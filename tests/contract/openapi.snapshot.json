@@ -1,0 +1,140 @@
+{
+  "paths": {
+    "/": {
+      "get": {
+        "responses": [
+          "200"
+        ],
+        "tags": []
+      }
+    },
+    "/events": {
+      "get": {
+        "responses": [
+          "200",
+          "422"
+        ],
+        "tags": [
+          "events"
+        ]
+      },
+      "post": {
+        "responses": [
+          "201",
+          "422"
+        ],
+        "tags": [
+          "events"
+        ]
+      }
+    },
+    "/events/{event_id}": {
+      "delete": {
+        "responses": [
+          "204",
+          "422"
+        ],
+        "tags": [
+          "events"
+        ]
+      },
+      "get": {
+        "responses": [
+          "200",
+          "422"
+        ],
+        "tags": [
+          "events"
+        ]
+      },
+      "patch": {
+        "responses": [
+          "200",
+          "422"
+        ],
+        "tags": [
+          "events"
+        ]
+      }
+    },
+    "/events/{event_id}/invitations": {
+      "get": {
+        "responses": [
+          "200",
+          "422"
+        ],
+        "tags": [
+          "invitations"
+        ]
+      },
+      "post": {
+        "responses": [
+          "201",
+          "422"
+        ],
+        "tags": [
+          "invitations"
+        ]
+      }
+    },
+    "/events/{event_id}/members": {
+      "get": {
+        "responses": [
+          "200",
+          "422"
+        ],
+        "tags": [
+          "members"
+        ]
+      },
+      "post": {
+        "responses": [
+          "201",
+          "422"
+        ],
+        "tags": [
+          "members"
+        ]
+      }
+    },
+    "/events/{event_id}/rooms/free": {
+      "get": {
+        "responses": [
+          "200",
+          "422"
+        ],
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/events/{event_id}/sessions": {
+      "get": {
+        "responses": [
+          "200",
+          "422"
+        ],
+        "tags": [
+          "sessions"
+        ]
+      },
+      "post": {
+        "responses": [
+          "201",
+          "422"
+        ],
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/health": {
+      "get": {
+        "responses": [
+          "200"
+        ],
+        "tags": []
+      }
+    }
+  }
+}

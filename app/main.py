@@ -1,4 +1,4 @@
-"""Dummy FastAPI entrypoint for the event-management-platform backend.
+"""FastAPI entrypoint for the event-management-platform backend.
 
 The Docker image runs:  uvicorn app.main:app
 `make up` waits on:      GET /health
@@ -8,10 +8,17 @@ import os
 
 from fastapi import FastAPI
 
+from app.routers import events, invitations, members, sessions
+
 app = FastAPI(
     title="Event Management Platform",
     version="0.1.0",
 )
+
+app.include_router(events.router)
+app.include_router(sessions.router)
+app.include_router(invitations.router)
+app.include_router(members.router)
 
 
 @app.get("/health")
@@ -29,3 +36,4 @@ def root() -> dict[str, str]:
         "db_configured": str("DATABASE_URL" in os.environ).lower(),
         "docs": "/docs",
     }
+

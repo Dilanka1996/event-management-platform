@@ -1,4 +1,4 @@
-.PHONY: up db seed test down clean logs psql build-backend
+.PHONY: up db seed test down clean logs psql build-backend agent-eval openapi-snapshot
 
 # 1. Boot both DB and Backend, then wait for FastAPI readiness
 up:
@@ -20,9 +20,19 @@ seed: db build-backend
 build-backend:
 	docker compose build backend > /dev/null
 
-# 3. Execute test suite against backend API
-test: db
+# 3. Execute test suite against backend API (runs seed so authz fixtures exist)
+test: seed
 	docker compose run --rm --entrypoint "" backend pytest -v --tb=short
+
+# 3b. Regenerate the committed OpenAPI contract snapshot (only when intended).
+openapi-snapshot: build-backend
+	docker compose run --rm --entrypoint "" backend \
+		python -m scripts.snapshot_openapi
+
+# 4. Run the agent eval suite (~15 scripted scenarios) and report pass rate.
+agent-eval: build-backend
+	docker compose run --rm --entrypoint "" backend \
+		python -m agent.scenarios
 
 # Ensure the database service is running (used as a prerequisite)
 db:

@@ -3,6 +3,10 @@
 The agent talks to the platform only through these dependencies, as the
 user's own token — there is no elevated key. Every authorization decision
 reads `event_roles` (data-driven), never a handler-level conditional.
+
+The chokepoint governs TWO things, both driven by the same data:
+  1. Which endpoints a caller can reach (capability required per route).
+  2. What a caller sees in the response BODY (field-level shaping below).
 """
 
 from dataclasses import dataclass
@@ -15,8 +19,20 @@ from app.db import get_session
 
 # Role capabilities, driven by data rather than conditionals in handlers.
 # "adding a role shouldn't mean editing handlers" → extend this table only.
+#
+# NOTE: capabilities also gate the RESPONSE BODY. `view_roster` and `view_pii`
+# are not about reachability alone — an ATTENDEE can read an event but must
+# never see the roster or anyone's email.
 ROLE_CAPABILITIES: dict[str, set[str]] = {
-    "ADMIN": {"read", "write_session", "manage_members", "manage_roles"},
+    "ADMIN": {
+        "read",
+        "write_session",
+        "invite_attendees",
+        "manage_members",
+        "manage_roles",
+        "view_roster",
+        "view_pii",
+    },
     "CONTRIBUTOR": {"read", "write_session", "invite_attendees"},
     "ATTENDEE": {"read"},
 }
@@ -72,6 +88,12 @@ def role_for_event(db: Session, user_id: int, event_id: int) -> str | None:
     return row.role if row else None
 
 
+def has_capability(db: Session, user: CurrentUser, event_id: int, capability: str) -> bool:
+    """Non-raising capability check (used for response-body shaping)."""
+    role = role_for_event(db, user.id, event_id)
+    return capability in ROLE_CAPABILITIES.get(role or "", set())
+
+
 def require_event_capability(
     db: Session, user: CurrentUser, event_id: int, capability: str
 ) -> str:
@@ -92,3 +114,4 @@ def require_event_capability(
             detail=f"Role {role} cannot perform {capability}",
         )
     return role
+
