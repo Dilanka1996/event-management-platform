@@ -33,6 +33,12 @@ services:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-emp}:${POSTGRES_PASSWORD:-emp}@db:5432/${POSTGRES_DB:-emp}
     ports:
       - "8000:8000"
+    # Bind-mount source so uvicorn --reload picks up host edits live.
+    volumes:
+      - ./app:/app/app
+      - ./agent:/app/agent
+      - ./scripts:/app/scripts
+      - ./tests:/app/tests
 
 volumes:
   pgdata:

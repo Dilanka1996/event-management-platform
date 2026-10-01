@@ -11,11 +11,17 @@ The chokepoint governs TWO things, both driven by the same data:
 
 from dataclasses import dataclass
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db import get_session
+
+# Declares the `Authorization: Bearer <token>` scheme so Swagger's Authorize
+# button knows to prepend "Bearer " — paste only the raw token (e.g. tok_1).
+# auto_error=False lets us return our own 401 message when it's absent.
+bearer_scheme = HTTPBearer(auto_error=False)
 
 # Role capabilities, driven by data rather than conditionals in handlers.
 # "adding a role shouldn't mean editing handlers" → extend this table only.
@@ -46,7 +52,7 @@ class CurrentUser:
 
 
 def get_current_user(
-    authorization: str | None = Header(default=None),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: Session = Depends(get_session),
 ) -> CurrentUser:
     """Resolve the caller from `Authorization: Bearer <token>`.
@@ -54,14 +60,14 @@ def get_current_user(
     Unknown / revoked tokens are rejected here, so a bad or attacker-supplied
     token cannot reach any write endpoint.
     """
-    if not authorization or not authorization.lower().startswith("bearer "):
+    if credentials is None or not credentials.credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing bearer token",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    token = authorization.split(" ", 1)[1].strip()
+    token = credentials.credentials.strip()
     row = db.execute(
         text("SELECT id, email, name FROM users WHERE api_token = :t"),
         {"t": token},

@@ -1,13 +1,16 @@
 .PHONY: up db seed test down clean logs psql build-backend agent-eval openapi-snapshot
 
-# 1. Boot both DB and Backend, then wait for FastAPI readiness
+# 1. Boot both DB and Backend (detached), wait for readiness, then stream
+#    the FastAPI server's live logs in the foreground. Ctrl-C detaches the
+#    log stream; the containers keep running (use `make down` to stop them).
 up:
 	docker compose up -d --build
 	@echo "Waiting for FastAPI backend to be online..."
 	@until curl -s http://localhost:8000/health > /dev/null; do \
 		sleep 1; \
 	done
-	@echo "PostgreSQL & FastAPI backend are online and running!"
+	@echo "PostgreSQL & FastAPI backend are online. Streaming backend logs (Ctrl-C to detach)..."
+	@docker compose logs -f backend
 
 # 2. Run migrations and seed the DB (50 events / 5k users / 50k invitations)
 #    Runs inside the backend image, so no local Python/Poetry needed.

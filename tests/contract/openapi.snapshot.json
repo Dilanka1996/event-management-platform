@@ -11,8 +11,7 @@
     "/events": {
       "get": {
         "responses": [
-          "200",
-          "422"
+          "200"
         ],
         "tags": [
           "events"

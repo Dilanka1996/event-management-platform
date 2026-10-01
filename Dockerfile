@@ -20,5 +20,6 @@ RUN poetry install --no-root --no-interaction --no-ansi
 COPY . .
 
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --reload streams live code changes during `make up` development.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
