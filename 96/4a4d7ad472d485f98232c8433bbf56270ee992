@@ -1,0 +1,26 @@
+.dockerignore
+  h_a2d31198f774fc 1-12
+Dockerfile
+  h_a2d31198f774fc 1-24
+Makefile
+  h_a2d31198f774fc 1-31
+app/main.py
+  h_a2d31198f774fc 1-31
+docker-compose.yaml
+  h_a2d31198f774fc 1-39
+pyproject.toml
+  h_a2d31198f774fc 1-24
+scripts/seed_data.py
+  h_a2d31198f774fc 1-12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "964a4d7ad472d485f98232c8433bbf56270ee992",
+  "prompts": {},
+  "humans": {
+    "h_a2d31198f774fc": {
+      "author": "Dilanka1996 <dilankasanjula1996@gmail.com>"
+    }
+  }
+}
