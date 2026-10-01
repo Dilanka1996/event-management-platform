@@ -1,0 +1,39 @@
+services:
+  db:
+    image: postgres:18
+    container_name: emp-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-emp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-emp}
+      POSTGRES_DB: ${POSTGRES_DB:-emp}
+      # Postgres 18 keeps data in a major-version subdir, so mount the parent.
+      PGDATA: /var/lib/postgresql/18/docker
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+      # *.sql / *.sh here run once on first init of an empty data dir.
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-emp} -d ${POSTGRES_DB:-emp}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  backend:
+    build: .
+    container_name: emp-backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-emp}:${POSTGRES_PASSWORD:-emp}@db:5432/${POSTGRES_DB:-emp}
+    ports:
+      - "8000:8000"
+
+volumes:
+  pgdata:
+

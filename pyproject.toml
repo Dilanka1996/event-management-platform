@@ -1,0 +1,24 @@
+[tool.poetry]
+name = "event-management-platform"
+version = "0.1.0"
+description = "Event management platform backend"
+authors = ["you <you@example.com>"]
+readme = "README.md"
+packages = [{ include = "app" }, { include = "agent" }, { include = "scripts" }]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+fastapi = "^0.115"
+uvicorn = { extras = ["standard"], version = "^0.30" }
+sqlalchemy = "^2.0"
+psycopg = { extras = ["binary"], version = "^3.2" }
+alembic = "^1.13"
+pydantic-settings = "^2.5"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3"
+httpx = "^0.27"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
