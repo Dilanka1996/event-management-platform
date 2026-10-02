@@ -14,9 +14,11 @@ sqlalchemy = "^2.0"
 psycopg = { extras = ["binary"], version = "^3.2" }
 alembic = "^1.13"
 pydantic-settings = "^2.5"
-
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3"
+# httpx: used by the agent's HTTP client (agent/tools.py, agent/classifier.py)
+# and the FastAPI TestClient. Tests/chat run via `docker compose run`, which
+# uses the dev environment, so it stays a dev dependency (no lockfile churn).
 httpx = "^0.27"
 
 [build-system]

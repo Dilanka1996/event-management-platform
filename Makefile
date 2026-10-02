@@ -1,4 +1,4 @@
-.PHONY: up db seed test down clean logs psql build-backend agent-eval openapi-snapshot
+.PHONY: up db seed test test-llm chat ollama-pull down clean logs psql build-backend agent-eval openapi-snapshot
 
 # 1. Boot both DB and Backend (detached), wait for readiness, then stream
 #    the FastAPI server's live logs in the foreground. Ctrl-C detaches the
@@ -24,8 +24,27 @@ build-backend:
 	docker compose build backend > /dev/null
 
 # 3. Execute test suite against backend API (runs seed so authz fixtures exist)
+#    Deterministic: no LLM required.
 test: seed
 	docker compose run --rm --entrypoint "" backend pytest -v --tb=short
+
+# 3c. LLM-backed tests: intent classification against the real local Ollama model.
+#     Requires a natively-running Ollama with the model pulled (`make ollama-pull`).
+test-llm: build-backend
+	docker compose run --rm --entrypoint "" backend \
+		pytest -v --tb=short agent/tests/test_classifier_llm.py
+
+# 3d. Interactive chat with the agent (local Ollama understanding + gated loop).
+#     Ollama runs on the HOST; the backend container reaches it via
+#     host.docker.internal (see docker-compose.yaml).
+chat: build-backend
+	docker compose run --rm --entrypoint "" -it backend python -m agent.chat
+
+# Pull the configured Ollama model on the HOST (no ollama container).
+# Requires Ollama installed and listening on localhost:11434.
+ollama-pull:
+	@echo "Pulling Ollama model $${OLLAMA_MODEL:-llama3.2:3b} on the host..."
+	@ollama pull $${OLLAMA_MODEL:-llama3.2:3b}
 
 # 3b. Regenerate the committed OpenAPI contract snapshot (only when intended).
 openapi-snapshot: build-backend
@@ -57,3 +76,6 @@ logs:
 # Open a psql shell into the database
 psql:
 	docker compose exec db psql -U $${POSTGRES_USER:-emp} -d $${POSTGRES_DB:-emp}
+
+
+

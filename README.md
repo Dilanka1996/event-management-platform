@@ -12,6 +12,13 @@ agent that drives it over the public API.
 | OpenAPI contract | `tests/test_openapi_contract.py` + `tests/contract/openapi.snapshot.json` | CI verifies the server honours the contract |
 | Time handling | `app/timeutil.py` | local wall-clock ↔ UTC, DST-safe |
 | Seed data | `scripts/seed_data.py` | 50 events / 5k users / 50k invitations, multiple timezones |
-| Agent | `agent/` | bounded loop, approval gate, legible trace, ~15 scenarios |
+| Agent | `agent/` | LLM intent understanding + bounded gated loop, legible trace, ~15 scenarios |
 
 ## Quick start
+
+## Agent chat (local LLM)
+
+Chat with the platform in natural language. A **local Ollama model**
+(`llama3.2:3b` by default) does *intent understanding and slot extraction only*;
+everything else is deterministic and gated:
+

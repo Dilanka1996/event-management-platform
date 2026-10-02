@@ -31,6 +31,12 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-emp}:${POSTGRES_PASSWORD:-emp}@db:5432/${POSTGRES_DB:-emp}
+      # The chat agent talks to a NATIVELY-run Ollama on the host. There is no
+      # ollama container: its image is ~3.7 GB and would be pulled by `make up`.
+      # host.docker.internal resolves to the host from inside the container
+      # (macOS/Windows out of the box; on Linux add an extra_hosts entry).
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
     ports:
       - "8000:8000"
     # Bind-mount source so uvicorn --reload picks up host edits live.
