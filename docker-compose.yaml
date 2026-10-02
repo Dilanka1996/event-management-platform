@@ -33,6 +33,12 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-emp}:${POSTGRES_PASSWORD:-emp}@db:5432/${POSTGRES_DB:-emp}
+      # The agent (chat CLI, agent-eval, tests) talks to the platform API.
+      # Inside the compose network the server is reachable by SERVICE NAME, not
+      # localhost — a `docker compose run backend ...` client container is NOT
+      # the server container, so localhost:8000 would hit itself (nothing there).
+      EMP_BASE_URL: ${EMP_BASE_URL:-http://backend:8000}
+      EMP_TOKEN: ${EMP_TOKEN:-tok_1}
       # In-process LLM config (see agent/classifier.py).
       LLM_MODEL: ${LLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct-GGUF}
       LLM_MODEL_FILE: ${LLM_MODEL_FILE:-qwen2.5-1.5b-instruct-q4_k_m.gguf}

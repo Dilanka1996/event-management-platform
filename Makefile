@@ -1,17 +1,18 @@
 .PHONY: up db seed test test-llm chat model-warm down clean logs psql build-backend agent-eval openapi-snapshot
 
-# 1. Boot DB + Backend (the LLM runs in-process in the backend), wait for
-#    readiness, warm the model, then drop into the interactive chat CLI in the
-#    foreground. Exit the chat to return (containers keep running; `make down`
-#    stops them). Fully containerised — no host Ollama / model server needed.
-up: build-backend
+# 1. Boot DB + Backend (the LLM runs in-process in the backend), ensure the DB
+#    is migrated + seeded, warm the model, then drop into the interactive chat
+#    CLI in the foreground. Exit the chat to return (containers keep running;
+#    `make down` stops them). Fully containerised — no host Ollama/server needed.
+#    `seed` runs BEFORE chat so the agent never talks to an empty DB (which
+#    returns HTTP 500 / "relation does not exist").
+up: seed model-warm
 	docker compose up -d --build
 	@echo "Waiting for PostgreSQL & FastAPI backend to be online..."
 	@until curl -s http://localhost:8000/health > /dev/null; do \
 		sleep 1; \
 	done
 	@echo "Backend is online."
-	@$(MAKE) --no-print-directory model-warm
 	@echo "Starting chat CLI (type 'exit' or Ctrl-D to quit)..."
 	@docker compose run --rm --entrypoint "" -it backend python -m agent.chat
 
@@ -23,8 +24,12 @@ seed: db build-backend
 	docker compose run --rm --entrypoint "" backend python -m scripts.verify_seed
 
 # Build (or refresh) the backend image so local file changes are copied in.
+# Progress is NOT hidden: the first build (or any dependency change) spends
+# minutes resolving Poetry deps and downloading/loading the GGUF, and a silent
+# build looks indistinguishable from a hang. Ctrl-Z suspends it — press `fg`.
 build-backend:
-	docker compose build backend > /dev/null
+	@echo "Building backend image (first build resolves deps + bakes the GGUF; be patient)..."
+	docker compose build backend
 
 # 3. Execute test suite against backend API (runs seed so authz fixtures exist)
 #    Deterministic: no LLM required.
