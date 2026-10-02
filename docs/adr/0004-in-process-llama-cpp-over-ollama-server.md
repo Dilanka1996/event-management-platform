@@ -1,8 +1,9 @@
 # ADR 0004 — In-process LLM (llama-cpp-python) instead of an Ollama server
 
 ## Status
-Accepted. Supersedes [ADR 0003](0003-local-ollama-over-hosted-api.md) *on the
-runtime only* (the "local model, no framework, no hosted API" decision stands).
+Superseded by [ADR 0005](0005-hosted-openai-over-local-model.md). The
+in-process llama.cpp runtime was replaced by the hosted OpenAI API, which also
+removed the baked GGUF and the `hf_cache` volume (see that ADR).
 
 ## Context
 ADR 0003 chose a local model called **over HTTP from a running `ollama serve`**.

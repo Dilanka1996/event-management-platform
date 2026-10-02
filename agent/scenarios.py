@@ -204,12 +204,31 @@ def scn_multi_write_preview():
 
 
 def scn_destructive_second_confirm():
-    api = FakeApi()
-    # first = approve write, second (destructive confirm) = deny
-    a = _agent(api, [True, False])
-    res = a.run([Plan("add_member", {"event_id": 1, "email": "x@y.com", "role": "ADMIN"})])
-    # add_member requires write approval only in gate() unless classified destructive
-    return Result("destructive needs stronger confirm", True, f"status={res['status']}")
+    """A destructive action needs TWO yeses; denying the second blocks it.
+
+    Asserts on `ApprovalGate.check` directly (the unit that owns this policy),
+    so it can actually fail — unlike asserting only that `run()` returned.
+    """
+    # (a) both answers yes -> allowed
+    yes = ApprovalGate(lambda _p: True)
+    ok_yes = yes.check("delete_event", "PERMANENTLY delete Event 1").allowed is True
+
+    # (b) first yes, typed confirm no -> denied (the "more than a shrug" case)
+    answers = iter([True, False])
+    shrug = ApprovalGate(lambda _p: next(answers))
+    d = shrug.check("delete_event", "PERMANENTLY delete Event 1")
+    ok_no = d.allowed is False
+
+    # (c) a plain write (non-destructive) needs only ONE approval
+    once = ApprovalGate(lambda _p: True)
+    ok_once = once.check("create_session", "book Room A").allowed is True
+
+    ok = ok_yes and ok_no and ok_once
+    return Result(
+        "destructive needs a second confirm (and a plain write doesn't)",
+        ok,
+        f"both-yes={ok_yes} second-no={ok_no} write-once={ok_once}",
+    )
 
 
 def scn_ambiguity_question():
@@ -218,15 +237,69 @@ def scn_ambiguity_question():
         {"id": 1, "title": "Launch Party", "timezone": "UTC", "description": ""},
         {"id": 2, "title": "Launch Review", "timezone": "UTC", "description": ""},
     ]
-    from agent.planner import resolve_event
+    from agent.planner import NeedsSlot, resolve_event
     try:
         resolve_event(api, "Launch")
         ok = False
         detail = "did not detect ambiguity"
-    except ValueError as e:
-        ok = "ambiguous" in str(e)
-        detail = str(e)
+    except NeedsSlot as e:
+        # Asks for the event AND offers the matching candidates to choose from.
+        ok = e.slot == "event" and len(e.candidates) == 2
+        detail = f"{e} -> {e.candidates}"
     return Result("ambiguity raises a question", ok, detail)
+
+
+def scn_followup_slot_merge():
+    """Turn 1 (no event) -> asks; turn 2 ('Event 1') -> merges and plans.
+
+    Uses a stub classifier so the test is deterministic: the follow-up line must
+    NOT be re-classified from scratch, or the title/when/duration are lost.
+    """
+    import io
+    from contextlib import redirect_stdout
+
+    from agent.chat import handle
+    from agent.classifier import Intent
+
+    class _StubClassifier:
+        def __init__(self):
+            self.calls = []
+
+        def classify(self, text, history=None):
+            self.calls.append(text)
+            # First turn: full request, no event named.
+            return Intent(action="create_session", confidence=0.9, slots={
+                "title": "Design Review", "when": "next Tuesday at 9am",
+                "duration": "45-minute",
+            })
+
+    api = FakeApi()
+    api.events = [
+        {"id": 1, "title": "Event 1", "timezone": "UTC", "description": ""},
+        {"id": 10, "title": "Event 10", "timezone": "UTC", "description": ""},
+    ]
+    classifier = _StubClassifier()
+    # Agent approves the (gated) write.
+    loop = _agent(api, [True])
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        pending = handle("schedule a design review", [], api, loop, classifier)
+        assert pending is not None, "first turn should ask for the event"
+        # Second turn: the bare event name must be merged, not re-classified.
+        pending = handle("Event 1", [], api, loop, classifier, pending=pending)
+
+    out = buf.getvalue()
+    # The follow-up was NOT sent to the classifier again.
+    ok_classify = classifier.calls == ["schedule a design review"]
+    # It resolved to event 1 and actually wrote the session there.
+    wrote = ("create_session:Room A", False) in api.calls
+    ok = ok_classify and wrote and pending is None
+    return Result(
+        "follow-up fills the missing event (no re-classify)",
+        ok,
+        f"classify={classifier.calls} calls={api.calls}",
+    )
 
 
 SCENARIOS = [
@@ -245,6 +318,7 @@ SCENARIOS = [
     scn_multi_write_preview,
     scn_destructive_second_confirm,
     scn_ambiguity_question,
+    scn_followup_slot_merge,
 ]
 
 

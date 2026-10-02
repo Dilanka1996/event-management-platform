@@ -14,21 +14,10 @@ sqlalchemy = "^2.0"
 psycopg = { extras = ["binary"], version = "^3.2" }
 alembic = "^1.13"
 pydantic-settings = "^2.5"
-# In-process LLM inference for the intent classifier (no Ollama server needed).
-# `source` pins it to the prebuilt CPU wheel index below, so Poetry installs a
-# wheel instead of compiling llama.cpp from source (which needs cmake/gcc).
-llama-cpp-python = { version = "^0.3.2", source = "llama-cpp-python-cpu" }
-# Required by Llama.from_pretrained to fetch/ locate the GGUF on the Hub; not a
-# transitive dep of llama-cpp-python's base install.
-huggingface-hub = "^0.27"
-
-# Prebuilt CPU wheels for llama-cpp-python (avoids a slow source build).
-# `explicit` = only used by packages that name it (i.e. llama-cpp-python above);
-# PyPI stays the default for everything else.
-[[tool.poetry.source]]
-name = "llama-cpp-python-cpu"
-url = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
-priority = "explicit"
+# Hosted LLM for the intent classifier (understanding + slot extraction).
+# Only comprehension is outsourced to the model; the trust boundary and safety
+# gates stay in-process. Requires OPENAI_API_KEY at runtime.
+openai = "^1.54"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3"

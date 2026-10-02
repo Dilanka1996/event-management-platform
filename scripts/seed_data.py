@@ -68,6 +68,11 @@ def seed(conn) -> None:
     # (stored as UTC instants). Event 2 (America/New_York) is deliberately
     # scheduled across the 2025-03-09 spring-forward DST boundary.
     # TIMEZONES is a trusted constant list, so building the array literal is safe.
+    #
+    # IDEMPOTENT: `events` has no natural unique key (title isn't UNIQUE), so we
+    # guard on the generated-description marker. Without this, every `make seed`
+    # appended another 50 "Event N" rows — tripling titles and making the agent's
+    # fuzzy event resolution ambiguous.
     tz_literal = "{" + ",".join(TIMEZONES) + "}"
     conn.execute(
         text(
@@ -80,18 +85,22 @@ def seed(conn) -> None:
                 TIMESTAMPTZ '2025-03-08 14:00:00+00' + (g || ' days')::interval,
                 TIMESTAMPTZ '2025-03-08 22:00:00+00' + (g || ' days')::interval
             FROM generate_series(1, :n) AS g
+            WHERE NOT EXISTS (
+                SELECT 1 FROM events WHERE description = 'Auto-generated event ' || g
+            )
             """
         ),
         {"n": EVENTS, "tzs": tz_literal, "nt": len(TIMEZONES)},
     )
 
     # The hostile-data event: description carries the injection payload.
+    # IDEMPOTENT: events.title isn't UNIQUE, so guard on the title directly.
     conn.execute(
         text(
             "INSERT INTO events (title, description, timezone, start_time, end_time) "
-            "VALUES ('Hostile Data Demo', :d, 'America/New_York', "
-            "TIMESTAMPTZ '2025-03-09 14:00:00+00', TIMESTAMPTZ '2025-03-09 22:00:00+00') "
-            "ON CONFLICT DO NOTHING"
+            "SELECT 'Hostile Data Demo', :d, 'America/New_York', "
+            "TIMESTAMPTZ '2025-03-09 14:00:00+00', TIMESTAMPTZ '2025-03-09 22:00:00+00' "
+            "WHERE NOT EXISTS (SELECT 1 FROM events WHERE title = 'Hostile Data Demo')"
         ),
         {"d": INJECTION_DESCRIPTION},
     )
@@ -145,6 +154,7 @@ def seed(conn) -> None:
 
     # A few sessions on the first event, including a strict overlap on Main
     # Hall so the conflict-recovery scenario has real data to hit.
+    # IDEMPOTENT: only seed these when the first event has no sessions yet.
     conn.execute(
         text(
             """
@@ -160,6 +170,9 @@ def seed(conn) -> None:
               ('Design Review', 'Room A',
                TIMESTAMPTZ '2025-03-09 16:00:00+00', TIMESTAMPTZ '2025-03-09 17:00:00+00')
             ) AS v(title, room_name, start_time, end_time)
+            WHERE NOT EXISTS (
+                SELECT 1 FROM sessions s WHERE s.event_id = e.id
+            )
             """
         )
     )

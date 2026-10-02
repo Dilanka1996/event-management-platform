@@ -42,6 +42,10 @@ class AgentLoop:
         self._interrupts: list[str] = []
         self.completed: list[str] = []
         self.skipped: list[str] = []
+        # Things the USER must decide/react to (e.g. "no room is free — pick
+        # another time"). The chat layer surfaces these as the actual reply;
+        # without it the trace would claim "ask the user" but never ask.
+        self.attention: list[str] = []
 
     # -- interruption -----------------------------------------------------
     def interrupt(self, note: str) -> None:
@@ -55,6 +59,12 @@ class AgentLoop:
 
     # -- core -------------------------------------------------------------
     def run(self, plans: list[Plan]) -> dict:
+        # Reset per-run state: the same AgentLoop is reused across REPL turns,
+        # so without this, completed/skipped/attention would accumulate.
+        self.completed = []
+        self.skipped = []
+        self.attention = []
+        self.trace = Trace()
         steps = 0
         for plan in plans:
             steps += 1
@@ -98,6 +108,10 @@ class AgentLoop:
         rooms = self._call("free_rooms", event_id, params["start"], params["minutes"])
         if not rooms:
             self.trace.add("think", "no room free in that window; ask the user")
+            self.attention.append(
+                f"No room is free for '{params['title']}' ({intent}). "
+                "Try a different time, a shorter session, or name a specific room."
+            )
             raise ApiError(409, "no free room for the requested window")
 
         chosen = params.get("room_name") or rooms[0]["room_name"]
@@ -117,6 +131,9 @@ class AgentLoop:
         decision = self.gate.check("create_session", preview.get("summary", chosen))
         self.trace.add("gate", f"create_session -> {decision.reason}")
         if not decision.allowed:
+            self.attention.append(
+                f"Cancelled — you declined to book '{params['title']}' in {chosen}."
+            )
             raise ApiError(403, decision.reason)
 
         # 4. INTERRUPT: absorb a correction before committing.
@@ -127,6 +144,10 @@ class AgentLoop:
                 chosen = "Room B"
                 rooms = self._call("free_rooms", event_id, params["start"], params["minutes"])
                 if not any(r["room_name"] == "Room B" for r in rooms):
+                    self.attention.append(
+                        f"Room B isn't free for '{params['title']}' ({intent}). "
+                        "Pick another room or time."
+                    )
                     raise ApiError(409, "Room B is not free")
 
         # 5. EXECUTE for real.
@@ -149,6 +170,7 @@ class AgentLoop:
         decision = self.gate.check("invite", preview.get("summary", "invite attendees"))
         self.trace.add("gate", f"invite -> {decision.reason}")
         if not decision.allowed:
+            self.attention.append("Cancelled — you declined to send those invitations.")
             raise ApiError(403, decision.reason)
         self._call("invite", event_id, params["emails"], dry_run=False)
         self.trace.add("result", "invitations sent")
@@ -159,6 +181,9 @@ class AgentLoop:
         decision = self.gate.check("add_member", preview)
         self.trace.add("gate", f"add_member -> {decision.reason}")
         if not decision.allowed:
+            self.attention.append(
+                f"Cancelled — you declined to grant {params['role']} to {params['email']}."
+            )
             raise ApiError(403, decision.reason)
         self._call("add_member", event_id, params["email"], params["role"])
         self.trace.add("result", "member added")
@@ -187,6 +212,7 @@ class AgentLoop:
             "status": status,
             "completed": list(self.completed),
             "skipped": list(self.skipped),
+            "attention": list(self.attention),
             "trace": self.trace.render(),
             "calls": self.trace.calls(),
         }

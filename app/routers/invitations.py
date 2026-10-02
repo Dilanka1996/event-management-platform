@@ -5,7 +5,8 @@ whether they are serialised into the response body.
 """
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import text
+from sqlalchemy import String, bindparam, text
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Session
 
 from app.auth import (
@@ -50,14 +51,20 @@ def create_invitations(
 
     inserted = 0
     if payload.emails:
+        # NOTE: do NOT write the list bind as `:emails::text[]` — SQLAlchemy's
+        # text() bind-param parser cannot disambiguate `:name` immediately
+        # followed by `::` (a Postgres cast), so the parameter is silently
+        # dropped from the params dict and Postgres receives a bare `:emails`
+        # (syntax error at ": " -> 500). Bind a plain `:emails` with an explicit
+        # ARRAY type and let unnest() consume the typed array.
         result = db.execute(
             text(
                 "INSERT INTO invitations (event_id, email, status) "
-                "SELECT :e, unnest(:emails::text[]), 'PENDING' "
+                "SELECT :e, unnest(:emails), 'PENDING' "
                 "ON CONFLICT (event_id, email) DO NOTHING "
                 "RETURNING id, event_id, email, status, created_at"
-            ),
-            {"e": event_id, "emails": payload.emails},
+            ).bindparams(bindparam("emails", type_=ARRAY(String))),
+            {"e": event_id, "emails": list(payload.emails)},
         )
         rows = result.all()
         inserted = len(rows)
@@ -102,3 +109,4 @@ def list_invitations(
         items=[_serialize(r, can_pii) for r in rows],
         next_cursor=next_cursor,
     )
+

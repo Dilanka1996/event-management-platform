@@ -1,4 +1,4 @@
-"""Intent classification via an IN-PROCESS local LLM (L1 design).
+"""Intent classification via a hosted OpenAI model (L1 design).
 
 The LLM's ONLY job is understanding: turn a natural-language utterance into a
 structured `Intent` (which action, and raw slot values). It does NOT resolve
@@ -11,28 +11,25 @@ body. The classifier never sees event data (no injection surface from stored
 text), and any parse failure degrades to `action="unknown"` so the chat layer
 asks the user instead of guessing.
 
-The model (default Qwen2.5-1.5B-Instruct, q4_k_m GGUF) is loaded once into this
-process via llama-cpp-python. There is NO Ollama server and no model port —
-inference runs in the same Python process as the API. Sampling is constrained by
-a JSON-schema grammar (llama.cpp), so the result is always a valid payload
-shape; correctness of the *values* is still the model's job.
+Backend: the hosted OpenAI Chat Completions API (default `gpt-4o-mini`) with
+Structured Outputs (`response_format={"type":"json_schema",...}`), so the model
+is grammar-constrained to a valid payload shape. Only comprehension quality is
+outsourced to the model; the trust boundary and safety semantics below are ours.
 
 Config (env):
-    LLM_MODEL       default Qwen/Qwen2.5-1.5B-Instruct-GGUF
-    LLM_MODEL_FILE  default qwen2.5-1.5b-instruct-q4_k_m.gguf
-    LLM_N_CTX       default 4096  (context window)
+    LLM_MODEL        default gpt-4o-mini
+    OPENAI_API_KEY   required
+    OPENAI_BASE_URL  optional (OpenAI-compatible endpoint)
 """
 
 from __future__ import annotations
 
 import json
 import os
-import threading
 from dataclasses import dataclass, field
 from typing import Literal
 
-DEFAULT_REPO = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
-DEFAULT_FILE = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 
 # The closed action set the rest of the system understands. "unknown" is the
 # explicit "I did not understand" signal — the chat layer asks, never guesses.
@@ -72,6 +69,10 @@ class Intent:
         slots = data.get("slots") or {}
         if not isinstance(slots, dict):
             slots = {}
+        # Structured Outputs forces every slot key to be present; the model
+        # signals "not provided" with null. Drop those so callers only see the
+        # slots the user actually gave us.
+        slots = {k: v for k, v in slots.items() if v is not None}
         try:
             confidence = float(data.get("confidence", 0.0))
         except (TypeError, ValueError):
@@ -79,11 +80,13 @@ class Intent:
         return cls(action=action, slots=slots, confidence=confidence, raw=raw)
 
 
-# JSON schema that constrains decoding (llama.cpp grammar) to a valid payload
-# shape. Note: llama.cpp's json_object/schema mode requires the top-level
-# "properties" to be exhaustive, hence the explicit required list below.
+# JSON schema for OpenAI Structured Outputs. Strict mode requires, at every
+# level: `additionalProperties: false`, and `required` listing EVERY property.
+# To still let the model omit a slot, each slot is typed nullable and the model
+# returns null for "not provided"; `Intent.from_json` drops the nulls.
 INTENT_SCHEMA: dict = {
     "type": "object",
+    "additionalProperties": False,
     "properties": {
         "action": {
             "type": "string",
@@ -92,20 +95,24 @@ INTENT_SCHEMA: dict = {
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "slots": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
-                "title": {"type": "string"},
-                "event": {"type": "string"},
-                "when": {"type": "string"},
-                "duration": {"type": "string"},
-                "room": {"type": "string"},
+                "title": {"type": ["string", "null"]},
+                "event": {"type": ["string", "null"]},
+                "when": {"type": ["string", "null"]},
+                "duration": {"type": ["string", "null"]},
+                "room": {"type": ["string", "null"]},
                 # emails/role kept as strings here to stay schema-simple; the
                 # validator normalises them (split / upper-case).
-                "emails": {"type": "string"},
-                "role": {"type": "string"},
+                "emails": {"type": ["string", "null"]},
+                "role": {"type": ["string", "null"]},
             },
+            "required": [
+                "title", "event", "when", "duration", "room", "emails", "role",
+            ],
         },
     },
-    "required": ["action", "confidence"],
+    "required": ["action", "confidence", "slots"],
 }
 
 SYSTEM_PROMPT = """You are the intent classifier for an event-management agent.
@@ -128,14 +135,16 @@ Actions and when to use them:
 - "unknown": the request is unclear, off-topic, or matches no action.
 
 Slot extraction (use the user's own words; do NOT invent values):
+Always include every slot key in "slots". Use null for any slot the user did
+NOT provide — never guess or invent one.
 - "event": the event the user names (e.g. "Event 3", "Hostile Data Demo"). Use
-  a substring of the title; omit if the user names no event.
+  a substring of the title; null if the user names no event.
 - "title": a short human title for a session (e.g. "Design Review").
 - "when": the time phrase verbatim (e.g. "next Tuesday at 9am", "tomorrow
   3pm"). Do NOT convert to a date — leave it as words.
 - "duration": the length phrase verbatim (e.g. "45-minute", "1 hour").
 - "room": an explicit room name (e.g. "Room B"), or "any" if the user says
-  "whichever room is free" / "any free room". Omit if unspecified.
+  "whichever room is free" / "any free room". null if unspecified.
 - "emails": comma-separated email addresses as a single string.
 - "role": one of ADMIN, CONTRIBUTOR, ATTENDEE (upper-case).
 
@@ -143,21 +152,26 @@ Examples:
 User: "Schedule a 45-minute design review next Tuesday at 9 am in whichever
 room is free"
 {"action":"create_session","confidence":0.97,"slots":{"title":"Design Review",
-"when":"next Tuesday at 9 am","duration":"45-minute","room":"any"}}
+"event":null,"when":"next Tuesday at 9 am","duration":"45-minute","room":"any",
+"emails":null,"role":null}}
 
 User: "invite alice@example.com and bob@example.com to Event 3"
 {"action":"invite","confidence":0.96,"slots":{"event":"Event 3",
-"emails":"alice@example.com, bob@example.com"}}
+"emails":"alice@example.com, bob@example.com","title":null,"when":null,
+"duration":null,"room":null,"role":null}}
 
 User: "make carol@example.com a contributor on Event 1"
 {"action":"add_member","confidence":0.95,"slots":{"event":"Event 1",
-"emails":"carol@example.com","role":"CONTRIBUTOR"}}
+"emails":"carol@example.com","role":"CONTRIBUTOR","title":null,"when":null,
+"duration":null,"room":null}}
 
 User: "what events do I have?"
-{"action":"list_events","confidence":0.93,"slots":{}}
+{"action":"list_events","confidence":0.93,"slots":{"title":null,"event":null,
+"when":null,"duration":null,"room":null,"emails":null,"role":null}}
 
 User: "tell me a joke"
-{"action":"unknown","confidence":0.2,"slots":{}}
+{"action":"unknown","confidence":0.2,"slots":{"title":null,"event":null,
+"when":null,"duration":null,"room":null,"emails":null,"role":null}}
 
 Return ONLY the JSON object."""
 
@@ -167,53 +181,81 @@ class ClassifierError(Exception):
 
 
 class IntentClassifier:
-    """In-process LLM classifier (llama-cpp-python). No resolution, no writes,
-    no event data — it only turns an utterance into an `Intent`.
+    """OpenAI-backed classifier. No resolution, no writes, no event data — it
+    only turns an utterance into an `Intent`.
 
-    The GGUF is loaded lazily on first use and cached on the instance. A single
-    `Llama` object is NOT thread-safe, so calls are serialised with a lock; a
-    FastAPI request pool would otherwise race on the same context.
+    The `openai` client is built lazily on first use and cached on the instance.
+    Pass `client=` to inject a fake (used by the parser tests) so they run with
+    no network and no API key.
     """
 
     def __init__(
         self,
         model: str | None = None,
-        model_file: str | None = None,
         *,
-        llm=None,
-        n_ctx: int | None = None,
-        verbose: bool = False,
+        client=None,
+        timeout: float | None = None,
     ):
-        self.repo = model or os.getenv("LLM_MODEL", DEFAULT_REPO)
-        self.filename = model_file or os.getenv("LLM_MODEL_FILE", DEFAULT_FILE)
-        self.n_ctx = n_ctx or int(os.getenv("LLM_N_CTX", "4096"))
-        self.verbose = verbose
-        self._llm = llm  # injectable for tests
-        self._lock = threading.Lock()
+        self.model = (
+            model or os.getenv("LLM_MODEL") or DEFAULT_OPENAI_MODEL
+        )
+        self.timeout = timeout or float(os.getenv("OPENAI_TIMEOUT", "30"))
+        self._client = client  # injectable for tests
 
-    def _ensure_loaded(self):
-        """Load the GGUF once. Downloads from HF on first call if not cached."""
-        if self._llm is not None:
-            return self._llm
+    def _ensure_client(self):
+        """Create the OpenAI client once (lazily)."""
+        if self._client is not None:
+            return self._client
         try:
-            from llama_cpp import Llama  # imported lazily so import-time is cheap
-        except ImportError as err:  # pragma: no cover - depends on image
+            from openai import OpenAI  # imported lazily so import-time is cheap
+        except ImportError as err:
             raise ClassifierError(
-                "llama-cpp-python is not installed; rebuild the image "
-                "(see pyproject.toml / Dockerfile)."
+                "the 'openai' package is not installed; add it to pyproject.toml "
+                "and rebuild the image (or `poetry install`)."
             ) from err
-        try:
-            self._llm = Llama.from_pretrained(
-                repo_id=self.repo,
-                filename=self.filename,
-                n_ctx=self.n_ctx,
-                verbose=self.verbose,
+        if not os.getenv("OPENAI_API_KEY"):
+            raise ClassifierError(
+                "OPENAI_API_KEY is not set; export it before using the classifier."
             )
-        except Exception as err:  # download / load failure
-            raise ClassifierError(
-                f"failed to load model {self.repo}/{self.filename}: {err}"
-            ) from err
-        return self._llm
+        # The SDK reads OPENAI_BASE_URL straight from the environment, so an
+        # empty value (compose injects "" when the var is undefined) makes it
+        # build a scheme-less URL ("missing an 'http://' or 'https://' protocol")
+        # instead of falling back to the default endpoint. Drop the var when it
+        # is blank so the SDK uses https://api.openai.com/v1.
+        base_url = (os.getenv("OPENAI_BASE_URL") or "").strip()
+        if base_url:
+            self._client = OpenAI(base_url=base_url, timeout=self.timeout)
+        else:
+            os.environ.pop("OPENAI_BASE_URL", None)
+            self._client = OpenAI(timeout=self.timeout)
+        return self._client
+
+    def _complete(self, messages: list[dict]) -> str:
+        client = self._ensure_client()
+        try:
+            # Structured Outputs: strict json_schema constrains decoding to the
+            # INTENT_SCHEMA payload shape.
+            out = client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "intent",
+                        "strict": True,
+                        "schema": INTENT_SCHEMA,
+                    },
+                },
+                temperature=0,
+                max_completion_tokens=256,
+            )
+        except Exception as err:
+            raise ClassifierError(f"openai inference failed: {err}") from err
+        if not out.choices:
+            return ""
+        return out.choices[0].message.content or ""
+
+    # -- public API ----------------------------------------------------------
 
     def classify(self, text: str, history: list[dict] | None = None) -> Intent:
         """Return an `Intent` for `text`. Never raises on parse failure — it
@@ -228,21 +270,7 @@ class IntentClassifier:
                     messages.append({"role": role, "content": str(turn.get("content", ""))})
         messages.append({"role": "user", "content": text})
 
-        llm = self._ensure_loaded()
-        try:
-            # Grammar-constrained decoding: response_format pins output to
-            # INTENT_SCHEMA, matching the old Ollama `format` behaviour.
-            with self._lock:
-                out = llm.create_chat_completion(
-                    messages=messages,
-                    response_format={"type": "json_object", "schema": INTENT_SCHEMA},
-                    temperature=0,
-                    max_tokens=256,
-                )
-        except Exception as err:
-            raise ClassifierError(f"inference failed: {err}") from err
-
-        content = ((out.get("choices") or [{}])[0].get("message") or {}).get("content", "")
+        content = self._complete(messages)
         return self._parse(content, text)
 
     @staticmethod

@@ -22,8 +22,8 @@ services:
       retries: 10
       start_period: 10s
 
-  # Backend runs the intent-classifier LLM IN-PROCESS (llama-cpp-python, Qwen2.5
-  # GGUF) — no Ollama server, no sidecar, no exposed model port.
+  # Backend: FastAPI + the agent. The intent-classifier LLM is the hosted
+  # OpenAI API (called over the network), so there is no local model service.
   backend:
     build: .
     container_name: emp-backend
@@ -39,9 +39,16 @@ services:
       # the server container, so localhost:8000 would hit itself (nothing there).
       EMP_BASE_URL: ${EMP_BASE_URL:-http://backend:8000}
       EMP_TOKEN: ${EMP_TOKEN:-tok_1}
-      # In-process LLM config (see agent/classifier.py).
-      LLM_MODEL: ${LLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct-GGUF}
-      LLM_MODEL_FILE: ${LLM_MODEL_FILE:-qwen2.5-1.5b-instruct-q4_k_m.gguf}
+            # OpenAI config (see agent/classifier.py). LLM_MODEL defaults to
+      # gpt-4o-mini. OPENAI_API_KEY is required at runtime — pass it via the
+      # shell or a .env file, never commit it.
+      # NOTE: OPENAI_BASE_URL is intentionally NOT set here. An empty value
+      # makes the OpenAI SDK build a scheme-less request URL ("missing an
+      # 'http://' or 'https://' protocol"); leave it unset and the SDK uses
+      # https://api.openai.com/v1. Set it explicitly only for a compatible
+      # endpoint — e.g. add `OPENAI_BASE_URL=https://...` to your .env.
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     ports:
       - "8000:8000"
     # Bind-mount source so uvicorn --reload picks up host edits live.
@@ -50,9 +57,5 @@ services:
       - ./agent:/app/agent
       - ./scripts:/app/scripts
       - ./tests:/app/tests
-      # Cache the downloaded GGUF across rebuilds (avoids re-downloading ~1GB).
-      - hf_cache:/root/.cache/huggingface
 volumes:
   pgdata:
-  hf_cache:
-

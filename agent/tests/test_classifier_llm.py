@@ -1,12 +1,13 @@
-"""LLM-backed intent classification tests against the REAL in-process model.
+"""LLM-backed intent classification tests against the REAL OpenAI model.
 
-Run via `make test-llm`. These load the Qwen2.5 GGUF in-process via
-llama-cpp-python (see agent/classifier.py) and assert on the STRUCTURED payload,
-not prose. Because a real model is stochastic, we accept a pass-rate threshold
-rather than demanding every case.
+Run via `make test-llm`. These call the hosted OpenAI API (see
+agent/classifier.py) and assert on the STRUCTURED payload, not prose. Because a
+real model is stochastic, we accept a pass-rate threshold rather than demanding
+every case.
 
-If llama-cpp-python or the model can't be loaded, the whole module is skipped so
-`pytest` on a bare machine doesn't fail spuriously.
+If `openai` isn't installed or `OPENAI_API_KEY` isn't set, the whole module is
+skipped so `pytest` on a bare machine (and in offline CI) doesn't fail —
+`make test` stays deterministic and LLM-free.
 """
 
 from __future__ import annotations
@@ -15,20 +16,17 @@ import pytest
 
 from agent.classifier import ClassifierError, IntentClassifier
 
-# Load the model ONCE for the whole module and reuse the instance everywhere —
-# both for the availability gate and for the tests — so the ~1GB weights are
-# read from disk a single time.
 _CLASSIFIER = IntentClassifier()
 _LOAD_ERROR: Exception | None = None
 try:
-    _CLASSIFIER._ensure_loaded()
+    _CLASSIFIER._ensure_client()
 except (ClassifierError, ImportError) as _err:  # pragma: no cover - env dependent
     _LOAD_ERROR = _err
 
 
 pytestmark = pytest.mark.skipif(
     _LOAD_ERROR is not None,
-    reason=f"llama-cpp-python / model not available: {_LOAD_ERROR}",
+    reason=f"openai / OPENAI_API_KEY not available: {_LOAD_ERROR}",
 )
 
 

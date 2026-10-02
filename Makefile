@@ -1,12 +1,26 @@
-.PHONY: up db seed test test-llm chat model-warm down clean logs psql build-backend agent-eval openapi-snapshot
+# Cross-platform recipe shell.
+# - On Unix/macOS, make already defaults to /bin/sh; we force bash so
+#   Bourne-specific syntax works consistently.
+# - On Windows, make defaults to cmd.exe, which cannot parse bash syntax
+#   (until/do/done, /dev/null). GNU Make sets OS=Windows_NT on Windows, so we
+#   point SHELL at Git Bash there. Override with: make SHELL=/path/to/bash
+ifeq ($(OS),Windows_NT)
+SHELL := C:/Program Files/Git/bin/bash.exe
+else
+SHELL := /bin/bash
+endif
+.SHELLFLAGS := -eu -o pipefail -c
 
-# 1. Boot DB + Backend (the LLM runs in-process in the backend), ensure the DB
-#    is migrated + seeded, warm the model, then drop into the interactive chat
-#    CLI in the foreground. Exit the chat to return (containers keep running;
-#    `make down` stops them). Fully containerised — no host Ollama/server needed.
+.PHONY: up db seed test test-llm chat down clean logs psql build-backend agent-eval openapi-snapshot
+
+# 1. Boot DB + Backend, ensure the DB is migrated + seeded, then drop into the
+#    interactive chat CLI in the foreground. Exit the chat to return (containers
+#    keep running; `make down` stops them). Fully containerised.
+#    The intent classifier calls the hosted OpenAI API, so set OPENAI_API_KEY in
+#    your environment first (e.g. `$env:OPENAI_API_KEY="sk-..."` on Windows).
 #    `seed` runs BEFORE chat so the agent never talks to an empty DB (which
 #    returns HTTP 500 / "relation does not exist").
-up: seed model-warm
+up: seed
 	docker compose up -d --build
 	@echo "Waiting for PostgreSQL & FastAPI backend to be online..."
 	@until curl -s http://localhost:8000/health > /dev/null; do \
@@ -25,35 +39,26 @@ seed: db build-backend
 
 # Build (or refresh) the backend image so local file changes are copied in.
 # Progress is NOT hidden: the first build (or any dependency change) spends
-# minutes resolving Poetry deps and downloading/loading the GGUF, and a silent
-# build looks indistinguishable from a hang. Ctrl-Z suspends it — press `fg`.
+# minutes resolving Poetry deps, and a silent build looks like a hang.
 build-backend:
-	@echo "Building backend image (first build resolves deps + bakes the GGUF; be patient)..."
+	@echo "Building backend image (first build resolves Poetry deps; be patient)..."
 	docker compose build backend
 
 # 3. Execute test suite against backend API (runs seed so authz fixtures exist)
-#    Deterministic: no LLM required.
+#    Deterministic: no LLM required, no API key needed.
 test: seed
 	docker compose run --rm --entrypoint "" backend pytest -v --tb=short
 
-# 3c. LLM-backed tests: intent classification against the real in-process model.
-#     `make model-warm` first so the GGUF is cached in the image/volume.
+# 3c. LLM-backed tests: intent classification against the real OpenAI model.
+#     Requires OPENAI_API_KEY; the module skips cleanly if it is unset.
 test-llm: build-backend
 	docker compose run --rm --entrypoint "" backend \
 		pytest -v --tb=short agent/tests/test_classifier_llm.py
 
-# 3d. Interactive chat with the agent (in-process LLM + gated loop).
-#     Warm the model first with `make model-warm`.
+# 3d. Interactive chat with the agent (OpenAI classifier + gated loop).
+#     Requires OPENAI_API_KEY.
 chat: build-backend
 	docker compose run --rm --entrypoint "" -it backend python -m agent.chat
-
-# Load the configured GGUF in-process so it's cached (image layer / hf_cache
-# volume) before the first real request. No-ops if already present.
-model-warm: build-backend
-	@echo "Warming in-process model ($${LLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct-GGUF})..."
-	@docker compose run --rm --entrypoint "" backend \
-		python -c "from agent.classifier import IntentClassifier; \
-IntentClassifier()._ensure_loaded(); print('model ready.')"
 
 # 3b. Regenerate the committed OpenAPI contract snapshot (only when intended).
 openapi-snapshot: build-backend
@@ -85,4 +90,3 @@ logs:
 # Open a psql shell into the database
 psql:
 	docker compose exec db psql -U $${POSTGRES_USER:-emp} -d $${POSTGRES_DB:-emp}
-

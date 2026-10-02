@@ -5,7 +5,7 @@ from datetime import datetime
 import pytest
 
 from agent.classifier import Intent
-from agent.planner import intent_to_plan, resolve_event
+from agent.planner import NeedsSlot, intent_to_plan, resolve_event
 from agent.scenarios import FakeApi
 
 
@@ -15,9 +15,53 @@ def test_resolve_event_by_hint():
         {"id": 1, "title": "Launch Party", "timezone": "UTC"},
         {"id": 2, "title": "Launch Review", "timezone": "UTC"},
     ]
-    with pytest.raises(ValueError, match="ambiguous"):
+    # "Launch" ties two titles -> needs the user to choose (offers candidates).
+    with pytest.raises(NeedsSlot) as exc:
         resolve_event(api, "Launch")
+    assert exc.value.slot == "event"
+    assert any("Launch Party" in c for c in exc.value.candidates)
     assert resolve_event(api, "Party")["id"] == 1
+
+
+def test_resolve_event_exact_beats_prefix():
+    """'Event 1' must resolve to 'Event 1', never 'Event 10'/'Event 11'."""
+    api = FakeApi()
+    api.events = [
+        {"id": 1, "title": "Event 1", "timezone": "UTC"},
+        {"id": 10, "title": "Event 10", "timezone": "UTC"},
+        {"id": 11, "title": "Event 11", "timezone": "UTC"},
+        {"id": 2, "title": "Event 2", "timezone": "UTC"},
+    ]
+    assert resolve_event(api, "Event 1")["id"] == 1
+    assert resolve_event(api, "Event 10")["id"] == 10
+    assert resolve_event(api, "Event 2")["id"] == 2
+
+
+def test_resolve_event_duplicate_rows_collapse():
+    """The same title stored on multiple rows resolves, not throws ambiguous."""
+    api = FakeApi()
+    api.events = [
+        {"id": 1, "title": "Event 1", "timezone": "UTC"},
+        {"id": 52, "title": "Event 1", "timezone": "UTC"},
+        {"id": 103, "title": "Event 1", "timezone": "UTC"},
+    ]
+    assert resolve_event(api, "Event 1")["id"] == 1
+
+
+def test_resolve_event_no_hint_many_events_asks():
+    api = FakeApi()
+    api.events = [{"id": i, "title": f"Event {i}", "timezone": "UTC"} for i in range(1, 6)]
+    with pytest.raises(NeedsSlot) as exc:
+        resolve_event(api, None)
+    assert exc.value.slot == "event"
+    assert len(exc.value.candidates) <= 8
+
+
+def test_resolve_event_no_match_asks():
+    api = FakeApi()
+    api.events = [{"id": 1, "title": "Event 1", "timezone": "UTC"}]
+    with pytest.raises(NeedsSlot):
+        resolve_event(api, "Nonexistent")
 
 
 def test_create_session_plan_resolves_utc_and_room_hint():

@@ -1,24 +1,51 @@
-"""Deterministic tests for the classifier's parsing/fallback (no real LLM).
+"""Deterministic tests for the classifier's parsing/fallback (no network, no key).
 
-We inject a fake in-process `llm` object so the JSON handling, schema coercion,
-and degradation-to-unknown are tested without loading the model.
+We inject a fake OpenAI-shaped client (with the `.chat.completions.create(...)`
+surface the real SDK exposes) so the JSON handling, schema coercion, and
+degradation-to-unknown are tested without calling a real model.
 """
 
-from agent.classifier import Intent, IntentClassifier
+import pytest
+
+from agent.classifier import ClassifierError, Intent, IntentClassifier
 
 
-class _FakeLlama:
-    """Minimal stand-in for a llama_cpp.Llama returning canned content."""
+# -- fake OpenAI client ------------------------------------------------------
+
+
+class _FakeMessage:
+    def __init__(self, content):
+        self.content = content
+
+
+class _FakeChoice:
+    def __init__(self, content):
+        self.message = _FakeMessage(content)
+
+
+class _FakeChatCompletions:
+    def __init__(self, owner):
+        self._owner = owner
+
+    def create(self, **kwargs):
+        self._owner.calls.append(kwargs)
+        return type("_Resp", (), {"choices": [_FakeChoice(self._owner.content)]})()
+
+
+class _FakeOpenAIClient:
+    """Minimal stand-in for openai.OpenAI."""
 
     def __init__(self, content):
-        self._content = content
-
-    def create_chat_completion(self, **kwargs):
-        return {"choices": [{"message": {"content": self._content}}]}
+        self.content = content
+        self.calls = []
+        self.chat = type("_Chat", (), {"completions": _FakeChatCompletions(self)})()
 
 
 def _classifier_returning(content):
-    return IntentClassifier(llm=_FakeLlama(content))
+    return IntentClassifier(client=_FakeOpenAIClient(content))
+
+
+# -- parsing / fallback ------------------------------------------------------
 
 
 def test_parses_valid_json():
@@ -52,3 +79,53 @@ def test_intent_from_json_defaults():
     assert intent.action == "help"
     assert intent.slots == {}
     assert intent.confidence == 0.0
+
+
+# -- OpenAI call shape -------------------------------------------------------
+
+
+def test_uses_strict_json_schema():
+    c = _classifier_returning('{"action":"help","confidence":0.5}')
+    c.classify("help")
+    call = c._client.calls[0]
+    assert call["model"] == "gpt-4o-mini"
+    rf = call["response_format"]
+    assert rf["type"] == "json_schema"
+    assert rf["json_schema"]["strict"] is True
+    schema = rf["json_schema"]["schema"]
+    # Strict mode: additionalProperties false + every property in `required`.
+    assert schema["additionalProperties"] is False
+    assert schema["required"] == ["action", "confidence", "slots"]
+    assert schema["properties"]["slots"]["additionalProperties"] is False
+    # Slot keys are required but nullable (model returns null for absent ones).
+    assert schema["properties"]["slots"]["properties"]["title"]["type"] == [
+        "string",
+        "null",
+    ]
+
+
+def test_null_slots_are_dropped():
+    c = _classifier_returning(
+        '{"action":"create_session","confidence":0.9,"slots":'
+        '{"title":"Design Review","event":null,"when":null,"duration":null,'
+        '"room":null,"emails":null,"role":null}}'
+    )
+    intent = c.classify("schedule a design review")
+    assert intent.slots == {"title": "Design Review"}
+
+
+def test_parses_structured_output():
+    c = _classifier_returning(
+        '{"action":"create_session","confidence":0.95,'
+        '"slots":{"title":"Design Review","when":"next Tuesday at 9am"}}'
+    )
+    intent = c.classify("schedule a design review next Tuesday at 9am")
+    assert intent.action == "create_session"
+    assert intent.slots["title"] == "Design Review"
+
+
+def test_client_requires_api_key_when_not_injected(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    c = IntentClassifier()
+    with pytest.raises(ClassifierError):
+        c.classify("list my events")

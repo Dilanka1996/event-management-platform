@@ -5,29 +5,24 @@ and — most importantly — a specific case where the AI produced wrong code, h
 I caught it, and what we changed.
 
 ## Tools used
-- **A coding assistant (agent mode) in the editor** for: reading/refactoring the
-  agent modules, writing the new `classifier.py` / `slot_validation.py` /
-  `chat.py`, wiring Docker/Makefile, and drafting these docs.
-- **A long design conversation with the assistant** as a *sounding board* for
-  architecture — this is where most of the value was. I drove the requirements;
-  the assistant helped me stress-test them (see "planning" below).
-- **In-process `llama-cpp-python` (Qwen2.5-1.5B-Instruct, GGUF)** as the runtime
-  LLM — loaded directly in the backend process, no model server. Not a code
-  assistant.
+
+- **VS Code + [Continue](https://continue.dev) with a DeepSeek model** as the
+  primary coding assistant. This was the agent-mode setup I actually worked in:
+  Continue patched files in-editor, ran the terminal, and I reviewed every diff
+  before accepting it. The DeepSeek model did the heavy lifting on code
+  generation (the classifier/slot/planner/chat modules, refactors, Docker/Makefile
+  wiring, test scaffolding), and I drove the architecture and accepted/rejected
+  each change.
 
 ## What I drove vs. delegated
 
-| I drove (my decisions) | I delegated (assistant executed) |
+| my decisions | assistant executed |
 |---|---|
 | The architecture: *gate outside the model; the LLM only understands* | Writing the classifier/slot/planner/chat modules |
 | Rejecting LangChain as the agent (after auditing the 9 requirements against it) | Producing the requirement-by-requirement audit that informed that call |
 | Choosing L1 (LLM understanding) **with deterministic resolution** of the dangerous slots | The `parse_when` date grammar, email/role validators |
 | Accepting/rejecting each Docker, lockfile, and dependency change | Compose/Makefile edits, test scaffolding |
-| The decision that the model must never emit `event_id`/UTC/room | Enforcing it in code + tests |
 
-Rules of engagement I kept: **the assistant proposes, I dispose.** Every
-architectural claim the assistant made, I re-checked against the nine stated
-requirements before acting on it.
 
 ## Planning process
 1. **Read the real constraints first.** I had the assistant map the nine
@@ -79,29 +74,10 @@ service `depends_on: ollama`.
 
 **What I did.** Removed the whole server dependency:
 - Deleted the `ollama` service *and* the `depends_on` edge.
-- Dropped the co-located `ollama serve` idea entirely: the model now loads
-  **in-process** via `llama-cpp-python` (Qwen2.5-1.5B GGUF). No port, no
-  server, no entrypoint supervisor.
+- Dropped the co-located `ollama serve` idea entirely: no port, no server, no
+  entrypoint supervisor. (The model first moved in-process via `llama-cpp-python`
+  + a Qwen GGUF — ADR 0004 — and was later replaced by the hosted OpenAI API —
+  ADR 0005 — which also removed the baked weights. The lesson below is about the
+  *edge*, not the transport.)
 - `make test` never touches the model at all; `make test-llm` / `make chat` are
-  the only paths that load it, and they cache it in the image/volume.
-
-**The lesson.** The AI optimised for *local correctness* ("backend needs a
-model") without reasoning about **blast radius** — who else triggers that edge —
-or about whether the *transport* (a server on `localhost:11434`) was needed at
-all. A dependency that is correct for `docker compose up` is wrong for
-`docker compose run <service>` in a repo where the same service is invoked for
-tests. And a "the obvious way to run a model is a server" assumption cost two
-dead-end attempts before landing on the simpler in-process design. I now
-sanity-check any infra edge the assistant adds against *every* command that
-traverses it — and ask "does this need to be a separate process at all?"
-
-**A second, smaller catch (same pattern, different layer).** The assistant wrote
-`parse_when`, then wrote a test asserting that `"tomorrow at 9am"` from
-`2025-03-08T00:00Z` resolves to `2025-03-09`. The test failed — and it was the
-**test** that was wrong: `2025-03-08T00:00Z` is still `2025-03-07` in New York,
-so "tomorrow" (resolved in the *event's* timezone) is `03-08`, not `03-09`. The
-code was right; the AI's expectation anchored on the UTC date instead of the
-event-local calendar. I fixed the test to use an unambiguous `now`, which also
-made it exercise the spring-forward boundary properly (`9am NY on 03-09 →
-13:00Z`). Lesson: when an AI-written test fails, check whether the *test's
-premise* is wrong before "fixing" working code.
+  the only paths that call it.

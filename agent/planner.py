@@ -11,6 +11,7 @@ source of truth.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -26,19 +27,85 @@ from agent.slot_validation import (
 from agent.tools import PlatformApi
 
 
+class NeedsSlot(SlotError):
+    """A required slot is missing/ambiguous; the REPL asks for it and merges
+    the answer into the pending intent. `candidates` optionally offers choices."""
+
+    def __init__(self, slot: str, message: str, candidates: list[str] | None = None):
+        super().__init__(message)
+        self.slot = slot
+        self.candidates = candidates or []
+
+
+def _title_rank(title: str, hint: str) -> int | None:
+    """Rank how well `title` matches `hint`; None means no match.
+
+    Ordered so an EXACT title beats a prefix, which beats a substring — so
+    "Event 1" matches "Event 1" (rank 0) and NEVER "Event 10" when an exact
+    match exists (the loose substring match loses on rank).
+    """
+    t = title.strip().lower()
+    h = hint.strip().lower()
+    if not h:
+        return None
+    if re.sub(r"\s+", " ", t) == re.sub(r"\s+", " ", h):
+        return 0
+    # whole-word substring: hint bounded by non-word chars, e.g. "event 3"
+    if re.search(rf"(?<!\w){re.escape(h)}(?!\w)", t):
+        return 1
+    if t.startswith(h):
+        return 2
+    if h in t:
+        return 3
+    return None
+
+
 def resolve_event(api: PlatformApi, title_hint: str | None) -> dict:
-    """Resolve an event by fuzzy title; the caller must disambiguate."""
+    """Resolve an event by fuzzy title.
+
+    Exact matches win over prefixes, which win over loose substrings, so
+    "Event 1" resolves to "Event 1" (not the "Event 1x" family).
+
+    Raises `NeedsSlot("event", ...)` when the user must name/choose an event:
+    no hint with many events, no match, or genuinely-tied candidates.
+    """
     events = api.list_events()
+    if not events:
+        raise NeedsSlot("event", "there are no events to choose from")
+
     if title_hint:
-        matches = [e for e in events if title_hint.lower() in e["title"].lower()]
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            raise ValueError(f"ambiguous event: {[m['title'] for m in matches]}")
-        raise ValueError(f"no event matching {title_hint!r}")
+        scored = [
+            (rank, e)
+            for e in events
+            if (rank := _title_rank(e["title"], title_hint)) is not None
+        ]
+        if scored:
+            best_rank = min(rank for rank, _ in scored)
+            winners = [e for rank, e in scored if rank == best_rank]
+            # Collapse duplicate rows that share the same title text.
+            uniq: dict[str, dict] = {}
+            for e in winners:
+                uniq.setdefault(e["title"].strip().lower(), e)
+            winners = list(uniq.values())
+            if len(winners) == 1:
+                return winners[0]
+            raise NeedsSlot(
+                "event",
+                f"which event did you mean by {title_hint!r}?",
+                candidates=[f"#{e['id']}  {e['title']}" for e in winners],
+            )
+        raise NeedsSlot(
+            "event",
+            f"no event matches {title_hint!r}; please name the event",
+        )
+
     if len(events) == 1:
         return events[0]
-    raise ValueError("could not resolve a single event; please name the event")
+    raise NeedsSlot(
+        "event",
+        "which event is this for? please name the event",
+        candidates=[f"#{e['id']}  {e['title']}" for e in events[:8]],
+    )
 
 
 def local_to_utc_iso(local_dt: datetime, tz_name: str) -> str:

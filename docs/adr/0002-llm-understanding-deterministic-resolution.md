@@ -18,9 +18,10 @@ failure — the worst kind for this assignment.
 ## Decision
 Split the pipeline at the trust boundary:
 
-1. **LLM (`agent/classifier.py`, in-process `Qwen2.5-1.5B-Instruct`)** does understanding and
-   slot *extraction only* — returns a schema-constrained `Intent(action, slots)`
-   with **raw hints** ("next Tuesday at 9am", "any", "alice@b.com").
+1. **LLM (`agent/classifier.py`, hosted OpenAI model — see ADR 0005)** does
+   understanding and slot *extraction only* — returns a schema-constrained
+   `Intent(action, slots)` with **raw hints** ("next Tuesday at 9am", "any",
+   "alice@b.com").
 2. **Deterministic code (`agent/slot_validation.py`, `agent/planner.py`)** does
    all resolution/validation: emails, role, duration, and **`parse_when`** →
    UTC ISO in the event's timezone (DST-safe); `resolve_event` → real id;
@@ -35,8 +36,8 @@ ISO datetimes, and a room name). It is fewer moving parts and works "most of
 the time."
 
 Rejected because:
-- Small local models **silently get calendar/DST arithmetic wrong** — a wrong
-  instant is a plausible-looking, hard-to-catch failure.
+- LLMs **silently get calendar/DST arithmetic wrong** — a wrong instant is a
+  plausible-looking, hard-to-catch failure.
 - The model would have to **invent/hallucinate IDs** it can't know unless we
   feed it event data — which reintroduces the injection surface the seeded
   "Hostile Data Demo" description exists to test.

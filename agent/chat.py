@@ -2,7 +2,7 @@
 
 Pipeline (L1 design):
     text
-      -> agent.classifier   (in-process LLM: understanding + slot extraction)
+      -> agent.classifier   (OpenAI LLM: understanding + slot extraction)
       -> agent.slot_validation / agent.planner (deterministic: resolve
          event id, UTC window, room — via reads)
       -> agent.loop.AgentLoop (governor: preview -> gate -> commit -> trace)
@@ -18,8 +18,9 @@ Usage:
 Env:
     EMP_BASE_URL     default http://localhost:8000
     EMP_TOKEN        default tok_1
-    LLM_MODEL        default Qwen/Qwen2.5-1.5B-Instruct-GGUF
-    LLM_MODEL_FILE   default qwen2.5-1.5b-instruct-q4_k_m.gguf
+    LLM_MODEL        default gpt-4o-mini
+    OPENAI_API_KEY   required
+    OPENAI_BASE_URL  optional (OpenAI-compatible endpoint)
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ import sys
 from agent.classifier import ClassifierError, IntentClassifier
 from agent.gate import ApprovalGate
 from agent.loop import AgentLoop
-from agent.planner import intent_to_plan
+from agent.planner import NeedsSlot, intent_to_plan, resolve_event
 from agent.slot_validation import SlotError
 from agent.tools import PlatformApi
 
@@ -52,65 +53,151 @@ def build_components(budget: int = 8):
     return api, loop, classifier
 
 
-def _render_reads(api: PlatformApi, action: str) -> None:
-    """Read-only actions are rendered directly (no gate needed)."""
-    if action == "list_events":
+def _render_reads(api: PlatformApi, intent) -> None:
+    """Read-only actions are rendered directly (no gate needed).
+
+    `intent` (not just the action) is passed so `list_sessions` can use the
+    `event` slot the classifier extracted — previously the slot was discarded
+    and every request printed the "specify an event" hint.
+    """
+    if intent.action == "list_events":
         events = api.list_events()
         if not events:
             print("(no events)")
         for e in events:
             print(f"  #{e['id']}  {e['title']}  [{e['timezone']}]")
-    elif action == "list_sessions":
-        # needs an event; ask via the resolver path elsewhere
-        print("(specify an event, e.g. 'show sessions for Event 3')")
+    elif intent.action == "list_sessions":
+        hint = intent.slots.get("event")
+        # Resolve the event deterministically; may raise NeedsSlot -> caller asks.
+        event = resolve_event(api, hint)
+        sessions = api.list_sessions(event["id"])
+        if not sessions:
+            print(f"(no sessions on #{event['id']} {event['title']})")
+            return
+        print(f"Sessions on #{event['id']} {event['title']}:")
+        for s in sessions:
+            print(
+                f"  {s['start_time']} → {s['end_time']}  "
+                f"{s['room_name']}  {s['title']}"
+            )
 
 
-def handle(text: str, history: list[dict], api, loop, classifier) -> None:
-    """One turn: classify -> resolve -> run gated loop -> report."""
-    try:
-        intent = classifier.classify(text, history)
-    except ClassifierError as err:
-        print(f"[classifier error] {err}")
-        return
+# ---------------------------------------------------------------------------
+# Pending-slot flow
+#
+# When the resolver needs a slot (e.g. "which event?"), we DO NOT re-classify
+# the next line from scratch — that would lose the title/when/duration we
+# already understood. Instead we keep the half-built `Intent` here, ask for the
+# one missing slot, and merge the user's answer in deterministically.
+# ---------------------------------------------------------------------------
+def _ask_for_slot(err: NeedsSlot) -> None:
+    print(f"I need the {err.slot}: {err}")
+    for line in err.candidates:
+        print(f"  {line}")
+
+
+# A short, unambiguous answer to "which event?" (the only slot we currently ask
+# for) is a bare title/label. If instead the line reads like a fresh command, we
+# abandon the pending intent and classify it normally. Kept deliberately small
+# and deterministic — no extra model call.
+_NEW_COMMAND_HINTS = (
+    "schedule", "book", "create", "invite", "add ", "make ", "grant",
+    "list", "show", "what", "help",
+)
+
+
+def _looks_like_new_command(text: str) -> bool:
+    t = text.strip().lower()
+    return any(t.startswith(h) for h in _NEW_COMMAND_HINTS)
+
+
+def handle(text: str, history: list[dict], api, loop, classifier, pending=None):
+    """One turn: classify -> resolve -> run gated loop -> report.
+
+    `pending` is a half-built Intent carried across turns (or None). Returns the
+    pending intent to carry into the next turn.
+    """
+    # If we're mid-request, treat this line as the answer to the missing slot —
+    # UNLESS it reads like a brand-new command, in which case start over.
+    intent = None
+    if pending is not None and not _looks_like_new_command(text):
+        slot = getattr(pending, "_pending_slot", None)
+        if slot:
+            candidate_slots = dict(pending.slots)
+            candidate_slots[slot] = text.strip()
+            pending.slots = candidate_slots
+            intent = pending
+    if intent is None:
+        try:
+            intent = classifier.classify(text, history)
+        except ClassifierError as err:
+            print(f"[classifier error] {err}")
+            return None
 
     if intent.action == "help":
         print("I can: schedule a session, invite attendees, add a member, or list events.")
         print("e.g. 'schedule a 45-minute design review next Tuesday at 9am'")
-        return
+        return None
     if intent.action == "unknown":
         print("I didn't understand that. Try: 'schedule a 45-minute design review "
               "next Tuesday at 9am' or 'list my events'.")
-        return
+        return None
     if intent.action in {"list_events", "list_sessions"}:
-        _render_reads(api, intent.action)
-        return
+        try:
+            _render_reads(api, intent)
+        except NeedsSlot as err:
+            # No/ambiguous event for list_sessions -> ask, and carry it so the
+            # next line ("Event 3") merges into this intent rather than being
+            # re-classified from scratch.
+            intent._pending_slot = err.slot
+            _ask_for_slot(err)
+            return intent
+        except SlotError as err:
+            print(f"I need a bit more detail: {err}")
+        return None
 
     # Resolve deterministically (may raise -> ask the user).
     try:
+        if hasattr(intent, "_pending_slot"):
+            del intent._pending_slot
         plans = intent_to_plan(api, intent)
+    except NeedsSlot as err:
+        # Remember what we have so far; ask for just the missing slot.
+        intent._pending_slot = err.slot
+        _ask_for_slot(err)
+        return intent
     except SlotError as err:
         print(f"I need a bit more detail: {err}")
-        return
+        return None
     except ValueError as err:
         print(f"I couldn't resolve that: {err}")
-        return
+        return None
 
     result = loop.run(plans)
     print(result["trace"])
+
+    # Surface anything the loop flagged as needing the user's decision — the
+    # trace may *say* "ask the user" but the trace alone never actually asks.
+    for note in result.get("attention", []):
+        print(f"\n{note}")
+
     if result["status"] == "budget_exhausted":
         print(f"\n[stopped: budget exhausted] completed={result['completed']} "
               f"skipped={result['skipped']}")
     elif result["skipped"]:
-        print(f"\n[done] completed={result['completed']} skipped={result['skipped']}")
+        if not result.get("attention"):
+            print(f"\n[done] completed={result['completed']} skipped={result['skipped']}")
     else:
         print(f"\n[done] completed={result['completed']}")
+    return None
 
 
 def repl() -> None:
     api, loop, classifier = build_components()
-    print("Event agent (local LLM). Type a request (type 'exit' or Ctrl-D to quit).")
+    print("Event agent (OpenAI). Type a request (type 'exit' or Ctrl-D to quit).")
     print("e.g. 'schedule a 45-minute design review next Tuesday at 9am'\n")
     history: list[dict] = []
+    pending = None
     while True:
         try:
             text = input("> ").strip()
@@ -122,7 +209,7 @@ def repl() -> None:
         if text.lower() in {"exit", "quit"}:
             print("Goodbye.")
             break
-        handle(text, history, api, loop, classifier)
+        pending = handle(text, history, api, loop, classifier, pending=pending)
         history.append({"role": "user", "content": text})
         print()
 
