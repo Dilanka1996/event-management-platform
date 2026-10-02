@@ -22,6 +22,8 @@ services:
       retries: 10
       start_period: 10s
 
+  # Backend runs the intent-classifier LLM IN-PROCESS (llama-cpp-python, Qwen2.5
+  # GGUF) — no Ollama server, no sidecar, no exposed model port.
   backend:
     build: .
     container_name: emp-backend
@@ -31,12 +33,9 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-emp}:${POSTGRES_PASSWORD:-emp}@db:5432/${POSTGRES_DB:-emp}
-      # The chat agent talks to a NATIVELY-run Ollama on the host. There is no
-      # ollama container: its image is ~3.7 GB and would be pulled by `make up`.
-      # host.docker.internal resolves to the host from inside the container
-      # (macOS/Windows out of the box; on Linux add an extra_hosts entry).
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
+      # In-process LLM config (see agent/classifier.py).
+      LLM_MODEL: ${LLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct-GGUF}
+      LLM_MODEL_FILE: ${LLM_MODEL_FILE:-qwen2.5-1.5b-instruct-q4_k_m.gguf}
     ports:
       - "8000:8000"
     # Bind-mount source so uvicorn --reload picks up host edits live.
@@ -45,7 +44,9 @@ services:
       - ./agent:/app/agent
       - ./scripts:/app/scripts
       - ./tests:/app/tests
-
+      # Cache the downloaded GGUF across rebuilds (avoids re-downloading ~1GB).
+      - hf_cache:/root/.cache/huggingface
 volumes:
   pgdata:
+  hf_cache:
 

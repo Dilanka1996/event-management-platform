@@ -1,40 +1,40 @@
-"""LLM-backed intent classification tests against a REAL local Ollama model.
+"""LLM-backed intent classification tests against the REAL in-process model.
 
-Run via `make test-llm` (requires `make ollama-pull` first). These tests hit
-Ollama at OLLAMA_BASE_URL with OLLAMA_MODEL (default llama3.2:3b) and assert on
-the STRUCTURED payload, not prose. Because a real model is stochastic, we accept
-a pass-rate threshold rather than demanding every case.
+Run via `make test-llm`. These load the Qwen2.5 GGUF in-process via
+llama-cpp-python (see agent/classifier.py) and assert on the STRUCTURED payload,
+not prose. Because a real model is stochastic, we accept a pass-rate threshold
+rather than demanding every case.
 
-If Ollama is unreachable, the whole module is skipped so `pytest` on a bare
-machine doesn't fail spuriously.
+If llama-cpp-python or the model can't be loaded, the whole module is skipped so
+`pytest` on a bare machine doesn't fail spuriously.
 """
 
 from __future__ import annotations
 
-import os
-
-import httpx
 import pytest
 
-from agent.classifier import OllamaClassifier
+from agent.classifier import ClassifierError, IntentClassifier
 
-BASE = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
+# Load the model ONCE for the whole module and reuse the instance everywhere —
+# both for the availability gate and for the tests — so the ~1GB weights are
+# read from disk a single time.
+_CLASSIFIER = IntentClassifier()
+_LOAD_ERROR: Exception | None = None
+try:
+    _CLASSIFIER._ensure_loaded()
+except (ClassifierError, ImportError) as _err:  # pragma: no cover - env dependent
+    _LOAD_ERROR = _err
 
 
-def _ollama_up() -> bool:
-    try:
-        return httpx.get(f"{BASE}/api/tags", timeout=2.0).status_code == 200
-    except httpx.HTTPError:
-        return False
-
-
-pytestmark = pytest.mark.skipif(not _ollama_up(), reason=f"Ollama not reachable at {BASE}")
+pytestmark = pytest.mark.skipif(
+    _LOAD_ERROR is not None,
+    reason=f"llama-cpp-python / model not available: {_LOAD_ERROR}",
+)
 
 
 @pytest.fixture(scope="module")
 def classifier():
-    return OllamaClassifier(BASE, MODEL)
+    return _CLASSIFIER
 
 
 # (utterance, expected action, slots that must be present)
@@ -66,7 +66,7 @@ def test_intent_classification_pass_rate(classifier):
     )
 
 
-def test_classifier_never_returns_event_id_or_utc():
+def test_classifier_never_returns_event_id_or_utc(classifier):
     """The model must not invent resolved values — only raw hints."""
     intent = classifier.classify(
         "schedule a 45-minute design review next Tuesday at 9am on Event 3"

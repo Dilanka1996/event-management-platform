@@ -1,16 +1,19 @@
-.PHONY: up db seed test test-llm chat ollama-pull down clean logs psql build-backend agent-eval openapi-snapshot
+.PHONY: up db seed test test-llm chat model-warm down clean logs psql build-backend agent-eval openapi-snapshot
 
-# 1. Boot both DB and Backend (detached), wait for readiness, then stream
-#    the FastAPI server's live logs in the foreground. Ctrl-C detaches the
-#    log stream; the containers keep running (use `make down` to stop them).
-up:
+# 1. Boot DB + Backend (the LLM runs in-process in the backend), wait for
+#    readiness, warm the model, then drop into the interactive chat CLI in the
+#    foreground. Exit the chat to return (containers keep running; `make down`
+#    stops them). Fully containerised — no host Ollama / model server needed.
+up: build-backend
 	docker compose up -d --build
-	@echo "Waiting for FastAPI backend to be online..."
+	@echo "Waiting for PostgreSQL & FastAPI backend to be online..."
 	@until curl -s http://localhost:8000/health > /dev/null; do \
 		sleep 1; \
 	done
-	@echo "PostgreSQL & FastAPI backend are online. Streaming backend logs (Ctrl-C to detach)..."
-	@docker compose logs -f backend
+	@echo "Backend is online."
+	@$(MAKE) --no-print-directory model-warm
+	@echo "Starting chat CLI (type 'exit' or Ctrl-D to quit)..."
+	@docker compose run --rm --entrypoint "" -it backend python -m agent.chat
 
 # 2. Run migrations and seed the DB (50 events / 5k users / 50k invitations)
 #    Runs inside the backend image, so no local Python/Poetry needed.
@@ -28,23 +31,24 @@ build-backend:
 test: seed
 	docker compose run --rm --entrypoint "" backend pytest -v --tb=short
 
-# 3c. LLM-backed tests: intent classification against the real local Ollama model.
-#     Requires a natively-running Ollama with the model pulled (`make ollama-pull`).
+# 3c. LLM-backed tests: intent classification against the real in-process model.
+#     `make model-warm` first so the GGUF is cached in the image/volume.
 test-llm: build-backend
 	docker compose run --rm --entrypoint "" backend \
 		pytest -v --tb=short agent/tests/test_classifier_llm.py
 
-# 3d. Interactive chat with the agent (local Ollama understanding + gated loop).
-#     Ollama runs on the HOST; the backend container reaches it via
-#     host.docker.internal (see docker-compose.yaml).
+# 3d. Interactive chat with the agent (in-process LLM + gated loop).
+#     Warm the model first with `make model-warm`.
 chat: build-backend
 	docker compose run --rm --entrypoint "" -it backend python -m agent.chat
 
-# Pull the configured Ollama model on the HOST (no ollama container).
-# Requires Ollama installed and listening on localhost:11434.
-ollama-pull:
-	@echo "Pulling Ollama model $${OLLAMA_MODEL:-llama3.2:3b} on the host..."
-	@ollama pull $${OLLAMA_MODEL:-llama3.2:3b}
+# Load the configured GGUF in-process so it's cached (image layer / hf_cache
+# volume) before the first real request. No-ops if already present.
+model-warm: build-backend
+	@echo "Warming in-process model ($${LLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct-GGUF})..."
+	@docker compose run --rm --entrypoint "" backend \
+		python -c "from agent.classifier import IntentClassifier; \
+IntentClassifier()._ensure_loaded(); print('model ready.')"
 
 # 3b. Regenerate the committed OpenAPI contract snapshot (only when intended).
 openapi-snapshot: build-backend
@@ -76,6 +80,4 @@ logs:
 # Open a psql shell into the database
 psql:
 	docker compose exec db psql -U $${POSTGRES_USER:-emp} -d $${POSTGRES_DB:-emp}
-
-
 

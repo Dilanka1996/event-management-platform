@@ -18,7 +18,9 @@ agent that drives it over the public API.
 
 ## Agent chat (local LLM)
 
-Chat with the platform in natural language. A **local Ollama model**
-(`llama3.2:3b` by default) does *intent understanding and slot extraction only*;
-everything else is deterministic and gated:
+Chat with the platform in natural language. A **local, in-process model**
+(`Qwen2.5-1.5B-Instruct` GGUF via `llama-cpp-python` by default) does *intent
+understanding and slot extraction only*; everything else is deterministic and
+gated. No Ollama server or model port is required — the model runs inside the
+backend process:
 

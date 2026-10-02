@@ -18,7 +18,7 @@ failure — the worst kind for this assignment.
 ## Decision
 Split the pipeline at the trust boundary:
 
-1. **LLM (`agent/classifier.py`, Ollama `llama3.2:3b`)** does understanding and
+1. **LLM (`agent/classifier.py`, in-process `Qwen2.5-1.5B-Instruct`)** does understanding and
    slot *extraction only* — returns a schema-constrained `Intent(action, slots)`
    with **raw hints** ("next Tuesday at 9am", "any", "alice@b.com").
 2. **Deterministic code (`agent/slot_validation.py`, `agent/planner.py`)** does

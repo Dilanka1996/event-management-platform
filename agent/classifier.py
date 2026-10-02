@@ -1,4 +1,4 @@
-"""Intent classification via a local Ollama LLM (L1 design).
+"""Intent classification via an IN-PROCESS local LLM (L1 design).
 
 The LLM's ONLY job is understanding: turn a natural-language utterance into a
 structured `Intent` (which action, and raw slot values). It does NOT resolve
@@ -11,19 +11,28 @@ body. The classifier never sees event data (no injection surface from stored
 text), and any parse failure degrades to `action="unknown"` so the chat layer
 asks the user instead of guessing.
 
+The model (default Qwen2.5-1.5B-Instruct, q4_k_m GGUF) is loaded once into this
+process via llama-cpp-python. There is NO Ollama server and no model port —
+inference runs in the same Python process as the API. Sampling is constrained by
+a JSON-schema grammar (llama.cpp), so the result is always a valid payload
+shape; correctness of the *values* is still the model's job.
+
 Config (env):
-    OLLAMA_BASE_URL  default http://localhost:11434
-    OLLAMA_MODEL     default llama3.2:3b
+    LLM_MODEL       default Qwen/Qwen2.5-1.5B-Instruct-GGUF
+    LLM_MODEL_FILE  default qwen2.5-1.5b-instruct-q4_k_m.gguf
+    LLM_N_CTX       default 4096  (context window)
 """
 
 from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import dataclass, field
-from typing import Callable, Literal
+from typing import Literal
 
-import httpx
+DEFAULT_REPO = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
+DEFAULT_FILE = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
 
 # The closed action set the rest of the system understands. "unknown" is the
 # explicit "I did not understand" signal — the chat layer asks, never guesses.
@@ -70,8 +79,9 @@ class Intent:
         return cls(action=action, slots=slots, confidence=confidence, raw=raw)
 
 
-# JSON schema handed to Ollama's structured-output mode so sampling is
-# constrained to a valid payload shape.
+# JSON schema that constrains decoding (llama.cpp grammar) to a valid payload
+# shape. Note: llama.cpp's json_object/schema mode requires the top-level
+# "properties" to be exhaustive, hence the explicit required list below.
 INTENT_SCHEMA: dict = {
     "type": "object",
     "properties": {
@@ -156,30 +166,54 @@ class ClassifierError(Exception):
     pass
 
 
-class OllamaClassifier:
-    """Talks to a local Ollama server. No resolution, no writes, no event data."""
+class IntentClassifier:
+    """In-process LLM classifier (llama-cpp-python). No resolution, no writes,
+    no event data — it only turns an utterance into an `Intent`.
+
+    The GGUF is loaded lazily on first use and cached on the instance. A single
+    `Llama` object is NOT thread-safe, so calls are serialised with a lock; a
+    FastAPI request pool would otherwise race on the same context.
+    """
 
     def __init__(
         self,
-        base_url: str | None = None,
         model: str | None = None,
+        model_file: str | None = None,
         *,
-        post: Callable[[str, dict], dict] | None = None,
-        timeout: float = 60.0,
+        llm=None,
+        n_ctx: int | None = None,
+        verbose: bool = False,
     ):
-        self.base_url = (base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
-        self.model = model or os.getenv("OLLAMA_MODEL", "llama3.2:3b")
-        self._post = post or self._http_post
-        self.timeout = timeout
+        self.repo = model or os.getenv("LLM_MODEL", DEFAULT_REPO)
+        self.filename = model_file or os.getenv("LLM_MODEL_FILE", DEFAULT_FILE)
+        self.n_ctx = n_ctx or int(os.getenv("LLM_N_CTX", "4096"))
+        self.verbose = verbose
+        self._llm = llm  # injectable for tests
+        self._lock = threading.Lock()
 
-    def _http_post(self, path: str, payload: dict) -> dict:
+    def _ensure_loaded(self):
+        """Load the GGUF once. Downloads from HF on first call if not cached."""
+        if self._llm is not None:
+            return self._llm
         try:
-            resp = httpx.post(f"{self.base_url}{path}", json=payload, timeout=self.timeout)
-        except httpx.HTTPError as err:  # network / connection issues
-            raise ClassifierError(f"Ollama unreachable at {self.base_url}: {err}") from err
-        if resp.status_code >= 400:
-            raise ClassifierError(f"Ollama HTTP {resp.status_code}: {resp.text[:200]}")
-        return resp.json()
+            from llama_cpp import Llama  # imported lazily so import-time is cheap
+        except ImportError as err:  # pragma: no cover - depends on image
+            raise ClassifierError(
+                "llama-cpp-python is not installed; rebuild the image "
+                "(see pyproject.toml / Dockerfile)."
+            ) from err
+        try:
+            self._llm = Llama.from_pretrained(
+                repo_id=self.repo,
+                filename=self.filename,
+                n_ctx=self.n_ctx,
+                verbose=self.verbose,
+            )
+        except Exception as err:  # download / load failure
+            raise ClassifierError(
+                f"failed to load model {self.repo}/{self.filename}: {err}"
+            ) from err
+        return self._llm
 
     def classify(self, text: str, history: list[dict] | None = None) -> Intent:
         """Return an `Intent` for `text`. Never raises on parse failure — it
@@ -194,15 +228,21 @@ class OllamaClassifier:
                     messages.append({"role": role, "content": str(turn.get("content", ""))})
         messages.append({"role": "user", "content": text})
 
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": False,
-            "format": INTENT_SCHEMA,
-            "options": {"temperature": 0},
-        }
-        data = self._post("/api/chat", payload)
-        content = (data.get("message") or {}).get("content", "")
+        llm = self._ensure_loaded()
+        try:
+            # Grammar-constrained decoding: response_format pins output to
+            # INTENT_SCHEMA, matching the old Ollama `format` behaviour.
+            with self._lock:
+                out = llm.create_chat_completion(
+                    messages=messages,
+                    response_format={"type": "json_object", "schema": INTENT_SCHEMA},
+                    temperature=0,
+                    max_tokens=256,
+                )
+        except Exception as err:
+            raise ClassifierError(f"inference failed: {err}") from err
+
+        content = ((out.get("choices") or [{}])[0].get("message") or {}).get("content", "")
         return self._parse(content, text)
 
     @staticmethod

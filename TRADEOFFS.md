@@ -36,21 +36,23 @@ loop stayed ours. See `docs/adr/0001`.
   month", "EOD"). `parse_when` covers ISO, relative days, weekday names, and
   clock times — the common cases — and asks the user otherwise rather than
   guessing.
-- **A bigger/more reliable model.** `llama3.2:3b` over `llama3.1:8b` for
-  footprint; over `1b` for structured-output reliability.
+- **A bigger/more reliable model.** `Qwen2.5-1.5B-Instruct` (GGUF, ~1 GB) as
+  the size/quality sweet spot; rejected `0.5B` (too weak at 7-action routing +
+  slot extraction) and larger models for footprint.
 
 ## Decisions this track forced
 - **Gate placement** → outside the model, in our loop (`docs/adr/0001`).
 - **Trust boundary for slots** → LLM emits hints only; `event_id`, UTC, and room
   are resolved deterministically; LLM output is treated as untrusted input
   (`docs/adr/0002`).
-- **Model/runtime** → local Ollama, no framework, no hosted API
-  (`docs/adr/0003`).
+- **Model/runtime** → local model, no framework, no hosted API; and the model
+  runs **in-process** (`llama-cpp-python`) rather than behind an Ollama server
+  (`docs/adr/0003`, superseded on runtime by `docs/adr/0004`).
 - **Eval determinism** → keep a deterministic `make test` (no LLM); put the
-  real-model tests behind `make test-llm`, skipped when Ollama is absent.
-- **Infra coupling** → do **not** make the backend container depend on the
-  Ollama container (a ~3.7 GB image); chat starts Ollama explicitly. (This was
-  a course-correction after a real misstep — see `AI-WORKFLOW.md`.)
+  real-model tests behind `make test-llm`, skipped when the model is absent.
+- **Infra coupling** → **no model server at all**, so there is no
+  backend→server dependency edge to get wrong. (An earlier Ollama/service
+  design was a real misstep — see `AI-WORKFLOW.md`.)
 
 ## What two more weeks would buy
 1. **True whole-plan preview & commit** — a two-phase plan (preview every write,

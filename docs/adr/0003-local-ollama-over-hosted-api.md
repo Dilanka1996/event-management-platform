@@ -1,7 +1,10 @@
 # ADR 0003 — Local Ollama model, no framework, no hosted API
 
 ## Status
-Accepted
+Superseded by [ADR 0004](0004-in-process-llama-cpp-over-ollama-server.md).
+(The *local model, no framework, no hosted API* decision still holds; only the
+"Ollama server" runtime is replaced by in-process inference. See the note under
+"Consequences".)
 
 ## Context
 The agent needs an LLM for intent classification and slot extraction. The brief

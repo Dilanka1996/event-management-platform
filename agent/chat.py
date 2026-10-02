@@ -2,7 +2,7 @@
 
 Pipeline (L1 design):
     text
-      -> agent.classifier   (Ollama LLM: understanding + slot extraction)
+      -> agent.classifier   (in-process LLM: understanding + slot extraction)
       -> agent.slot_validation / agent.planner (deterministic: resolve
          event id, UTC window, room — via reads)
       -> agent.loop.AgentLoop (governor: preview -> gate -> commit -> trace)
@@ -18,8 +18,8 @@ Usage:
 Env:
     EMP_BASE_URL     default http://localhost:8000
     EMP_TOKEN        default tok_1
-    OLLAMA_BASE_URL  default http://localhost:11434
-    OLLAMA_MODEL     default llama3.2:3b
+    LLM_MODEL        default Qwen/Qwen2.5-1.5B-Instruct-GGUF
+    LLM_MODEL_FILE   default qwen2.5-1.5b-instruct-q4_k_m.gguf
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from __future__ import annotations
 import os
 import sys
 
-from agent.classifier import ClassifierError, OllamaClassifier
+from agent.classifier import ClassifierError, IntentClassifier
 from agent.gate import ApprovalGate
 from agent.loop import AgentLoop
 from agent.planner import intent_to_plan
@@ -48,7 +48,7 @@ def build_components(budget: int = 8):
     api = PlatformApi(base, token)
     gate = ApprovalGate(_stdin_approval)
     loop = AgentLoop(api, gate, budget=budget)
-    classifier = OllamaClassifier()
+    classifier = IntentClassifier()
     return api, loop, classifier
 
 
@@ -108,7 +108,7 @@ def handle(text: str, history: list[dict], api, loop, classifier) -> None:
 
 def repl() -> None:
     api, loop, classifier = build_components()
-    print("Event agent (local LLM). Type a request (Ctrl-D to exit).")
+    print("Event agent (local LLM). Type a request (type 'exit' or Ctrl-D to quit).")
     print("e.g. 'schedule a 45-minute design review next Tuesday at 9am'\n")
     history: list[dict] = []
     while True:
@@ -119,6 +119,9 @@ def repl() -> None:
             break
         if not text:
             continue
+        if text.lower() in {"exit", "quit"}:
+            print("Goodbye.")
+            break
         handle(text, history, api, loop, classifier)
         history.append({"role": "user", "content": text})
         print()

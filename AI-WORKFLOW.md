@@ -11,7 +11,9 @@ I caught it, and what we changed.
 - **A long design conversation with the assistant** as a *sounding board* for
   architecture — this is where most of the value was. I drove the requirements;
   the assistant helped me stress-test them (see "planning" below).
-- **Local Ollama (`llama3.2:3b`)** as the runtime LLM — not as a code assistant.
+- **In-process `llama-cpp-python` (Qwen2.5-1.5B-Instruct, GGUF)** as the runtime
+  LLM — loaded directly in the backend process, no model server. Not a code
+  assistant.
 
 ## What I drove vs. delegated
 
@@ -45,17 +47,24 @@ requirements before acting on it.
 
 ## The case where the AI produced wrong code
 
-**What it did.** To run Ollama for chat, the assistant added an `ollama` service
-to `docker-compose.yaml` **and** made the `backend` service
-`depends_on: ollama`. It looked correct — the agent needs Ollama, so declaring a
-dependency seems obviously right.
+**What it did.** To make the agent work, the assistant set up **three different
+ways to run the model** across the conversation, each as if it were the obvious
+answer: first a separate `ollama` compose service; then (when I asked for
+"single container") a *co-located* `ollama serve` bolted into the backend image
+with a supervisord entrypoint; then finally the correct one — load a GGUF
+**in-process** with `llama-cpp-python`. The first attempt also made `backend`
+service `depends_on: ollama`.
 
-**Why it was wrong.** `docker compose run backend …` (which is exactly what
-`make test`, `make seed`, etc. use) honours `depends_on`, so **every** backend
-run tried to pull the `ollama/ollama` image — a **~3.6 GB** image (it bundles
-CUDA/ROCm GPU runtimes). On my machine the test command *hung*, downloading
-3.6 GB, instead of running tests. The result: the fast, deterministic path was
-silently coupled to a heavyweight optional dependency.
+**Why it was wrong.** Two separate problems:
+1. The `depends_on: ollama` edge: `docker compose run backend …` (what
+   `make test`, `make seed`, etc. use) honours `depends_on`, so **every**
+   backend run tried to pull the `ollama/ollama` image — a **~3.6 GB** image
+   (it bundles CUDA/ROCm runtimes). The fast deterministic test path got
+   silently coupled to a heavyweight optional dependency.
+2. Chasing "single container" led to *credential-stuffing Ollama into a Python
+   image* — a non-Python binary + an entrypoint supervisor + a model volume,
+   all so the app could keep talking to `localhost:11434`. That's strictly more
+   moving parts than just running the model in the process that needs it.
 
 **How I caught it.** I ran the deterministic tests and the command stalled on
 `824f81b155e3 Downloading … 3.607GB`. I debugged step by step:
@@ -64,23 +73,27 @@ silently coupled to a heavyweight optional dependency.
 2. `docker compose ps` → no stuck container; the run was blocked on pull.
 3. Reasoned from the compose semantics: `depends_on` → `run backend` pulls
    `ollama` → 3.6 GB. That traced straight back to the assistant's edit.
-4. (Separately, the *same* change also made `make up` pull the image, which is
-   where I *saw* the "3.75GB Pulling" line.)
+4. The "build Ollama into the backend image" attempt then failed differently —
+   the installer exited on a missing `zstd` — which is a hint that I was forcing
+   a server into a place it didn't belong.
 
-**What I did.** Removed the hard dependency:
-- Deleted `depends_on: ollama` and added a comment explaining *why* (so it
-  isn't "helpfully" re-added later).
-- Made the Ollama service opt-in: only `make chat` / `make ollama-pull` start
-  it; `make test` never touches it.
-- Since I run Ollama **natively** anyway, the Docker Ollama service is
-  unnecessary — the agent just talks to `http://localhost:11434`.
+**What I did.** Removed the whole server dependency:
+- Deleted the `ollama` service *and* the `depends_on` edge.
+- Dropped the co-located `ollama serve` idea entirely: the model now loads
+  **in-process** via `llama-cpp-python` (Qwen2.5-1.5B GGUF). No port, no
+  server, no entrypoint supervisor.
+- `make test` never touches the model at all; `make test-llm` / `make chat` are
+  the only paths that load it, and they cache it in the image/volume.
 
-**The lesson.** The AI optimised for *local correctness* ("backend needs
-ollama") without reasoning about **blast radius** — who else triggers that edge.
-A dependency that is correct for `docker compose up` is wrong for
+**The lesson.** The AI optimised for *local correctness* ("backend needs a
+model") without reasoning about **blast radius** — who else triggers that edge —
+or about whether the *transport* (a server on `localhost:11434`) was needed at
+all. A dependency that is correct for `docker compose up` is wrong for
 `docker compose run <service>` in a repo where the same service is invoked for
-tests. I now sanity-check any infra edge the assistant adds against *every*
-command that traverses it.
+tests. And a "the obvious way to run a model is a server" assumption cost two
+dead-end attempts before landing on the simpler in-process design. I now
+sanity-check any infra edge the assistant adds against *every* command that
+traverses it — and ask "does this need to be a separate process at all?"
 
 **A second, smaller catch (same pattern, different layer).** The assistant wrote
 `parse_when`, then wrote a test asserting that `"tomorrow at 9am"` from
